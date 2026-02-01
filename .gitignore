@@ -1,0 +1,22 @@
+# User Configuration (Secrets)
+config.json
+
+# Build Artifacts
+dist/
+build/
+installer/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# IDEs
+.vscode/
+.idea/
+.DS_Store
+
+# Virtual Environments
+venv/
+env/
