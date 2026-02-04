@@ -8,6 +8,7 @@ import json
 import re
 import urllib.request
 import ssl
+import certifi
 from PyQt6.QtGui import QFontDatabase, QFont
 from utils import get_resource_path, get_config_path
 
@@ -121,8 +122,9 @@ def fetch_mdi_mapping_worker():
     global _mdi_cache, _is_fetching
     try:
         print("Fetching MDI mapping in background...")
-        context = ssl._create_unverified_context()
-        with urllib.request.urlopen(MDI_CSS_URL, context=context) as response:
+        # Use verified SSL context with certifi CA bundle
+        context = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(MDI_CSS_URL, context=context, timeout=30) as response:
             css_content = response.read().decode('utf-8')
             
         mapping = {}

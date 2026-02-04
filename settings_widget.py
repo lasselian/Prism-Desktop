@@ -15,6 +15,7 @@ from PyQt6.QtGui import QFont, QColor, QDesktopServices
 
 from worker_threads import ConnectionTestThread
 from update_checker import UpdateCheckerThread
+from secure_storage import get_effective_token, save_token_securely
 
 class SettingsWidget(QWidget):
     """
@@ -435,7 +436,9 @@ class SettingsWidget(QWidget):
         """Load current config values."""
         ha = self.config.get('home_assistant', {})
         self.url_input.setText(ha.get('url', ''))
-        self.token_input.setText(ha.get('token', ''))
+        # Get token from secure storage (keyring) or fallback to config
+        token = get_effective_token(self.config)
+        self.token_input.setText(token)
         
         app = self.config.get('appearance', {})
         theme_map = {'system': 0, 'light': 1, 'dark': 2}
@@ -463,10 +466,12 @@ class SettingsWidget(QWidget):
         """Save and emit config."""
         self._cleanup_threads()
         
-        # HA
+        # HA - save token securely
         if 'home_assistant' not in self.config: self.config['home_assistant'] = {}
         self.config['home_assistant']['url'] = self.url_input.text().strip()
-        self.config['home_assistant']['token'] = self.token_input.text().strip()
+        # Store token in secure storage (keyring) instead of plaintext config
+        token = self.token_input.text().strip()
+        self.config = save_token_securely(token, self.config)
         
         # Appearance
         theme_map = {0: 'system', 1: 'light', 2: 'dark'}

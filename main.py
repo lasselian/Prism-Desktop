@@ -23,6 +23,7 @@ from tray_manager import TrayManager
 from notifications import NotificationManager
 from input_manager import InputManager
 from icons import load_mdi_font
+from secure_storage import get_effective_token, save_token_securely, migrate_token_to_keyring
 
 VERSION = "1.1"
 
@@ -134,19 +135,24 @@ class PrismDesktopApp(QObject):
     
     def load_config(self) -> dict:
         """Load configuration from file."""
-        if self.config_path.exists():
-            try:
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"Error loading config: {e}")
-        
-        return {
+        config = {
             "home_assistant": {"url": "", "token": ""},
             "appearance": {"theme": "system", "rows": 2},
             "shortcut": {"type": "keyboard", "value": "<ctrl>+<alt>+h", "modifier": "Alt"},
             "buttons": []
         }
+        
+        if self.config_path.exists():
+            try:
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            except Exception as e:
+                print(f"Error loading config: {e}")
+        
+        # Migrate plaintext token to secure storage if present
+        config = migrate_token_to_keyring(config)
+        
+        return config
     
     def save_config(self):
         """Save configuration to file."""
@@ -164,9 +170,11 @@ class PrismDesktopApp(QObject):
     def init_ha_client(self):
         """Initialize Home Assistant client."""
         ha_config = self.config.get('home_assistant', {})
+        # Get token from secure storage (keyring) or fallback to config
+        token = get_effective_token(self.config)
         self.ha_client.configure(
             url=ha_config.get('url', ''),
-            token=ha_config.get('token', '')
+            token=token
         )
     
     def init_ui(self):
