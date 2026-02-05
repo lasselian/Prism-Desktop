@@ -8,6 +8,7 @@ import json
 import re
 import urllib.request
 import ssl
+import certifi
 from PyQt6.QtGui import QFontDatabase, QFont
 from utils import get_resource_path, get_config_path
 
@@ -103,6 +104,10 @@ class Icons:
     PALETTE_OUTLINE = "\U000F0E0C"     # mdi-palette-outline (Corrected)
     SCENE_THEME = PALETTE_OUTLINE      # Default scene icon
     
+    # Image/Camera
+    IMAGE = "\U000F0313"               # mdi-image
+    CAMERA = "\U000F0100"              # mdi-camera
+    
     # Empty/placeholder
     CIRCLE_OUTLINE = "\U000F0766"      # mdi-circle-outline
     CHECKBOX_BLANK_CIRCLE_OUTLINE = "\U000F0130"
@@ -121,8 +126,9 @@ def fetch_mdi_mapping_worker():
     global _mdi_cache, _is_fetching
     try:
         print("Fetching MDI mapping in background...")
-        context = ssl._create_unverified_context()
-        with urllib.request.urlopen(MDI_CSS_URL, context=context) as response:
+        # Use verified SSL context with certifi CA bundle
+        context = ssl.create_default_context(cafile=certifi.where())
+        with urllib.request.urlopen(MDI_CSS_URL, context=context, timeout=30) as response:
             css_content = response.read().decode('utf-8')
             
         mapping = {}
