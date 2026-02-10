@@ -4,7 +4,9 @@ A modern, native Windows client for Home Assistant that lives in your system tra
 
 I built this because I wanted a faster, more elegant way to control my smart home without opening a browser tab. It features a sleek dashboard with fluid animations, drag-and-drop customization, and deep integration with Home Assistant entities.
 
-<img width="439" height="399" alt="prismdesktop" src="https://github.com/user-attachments/assets/bfb576a4-d65f-4f3f-a9da-e5e26f89e404" />
+<img width="418" height="497" alt="image" src="https://github.com/user-attachments/assets/14e5d292-98be-4270-9ce3-9f9661499370" />
+
+
 
 
 ## Features
@@ -64,7 +66,8 @@ If you want to modify the code or run it manually:
 
 Upon first launch, you will be asked for your Home Assistant URL and a Long-Lived Access Token. You can generate this token in your Home Assistant profile settings.
 
-<img width="429" height="691" alt="image" src="https://github.com/user-attachments/assets/a8a2a005-cda2-4068-80e8-25643924a8ed" />
+<img width="420" height="729" alt="image" src="https://github.com/user-attachments/assets/b77c9c29-ea0e-4f42-be96-fafc37e41b8c" />
+
 
 
 ## Building
