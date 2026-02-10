@@ -1,11 +1,16 @@
 # Prism Desktop
+**A Home Assistant PC App for Windows & Linux**
 
-A modern, native Windows client for Home Assistant that lives in your system tray.
+Prism Desktop brings Home Assistant to your PC with a modern, lightweight desktop experience.  
+It features a sleek dashboard with smooth animations, build in notifications, intuitive drag-and-drop customization, and deep integration with Home Assistant entities.
 
-I built this because I wanted a faster, more elegant way to control my smart home without opening a browser tab. It features a sleek dashboard with fluid animations, drag-and-drop customization, and deep integration with Home Assistant entities.
 
-<img width="418" height="497" alt="image" src="https://github.com/user-attachments/assets/14e5d292-98be-4270-9ce3-9f9661499370" />
-
+<img
+  width="418"
+  height="497"
+  alt="Prism Desktop – Home Assistant PC app dashboard"
+  src="https://github.com/user-attachments/assets/14e5d292-98be-4270-9ce3-9f9661499370"
+/>
 
 
 
