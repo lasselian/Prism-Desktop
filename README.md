@@ -15,22 +15,23 @@ I built this because I wanted a faster, more elegant way to control my smart hom
 - **Real-time Sync**: Uses Home Assistant's WebSocket API for instant state updates.
 - **Customizable Appearance**: Choose from different border effects (like Rainbow or Aurora) and customize button colors.
 
-## Supported entity types:
-- light / switch
-- sensor
-- climate
-- curtain / cover
-- script
-- scene
+## Supported Entity Types
+- Light / Switch
+- Sensor
+- Climate
+- Curtain / Cover
+- Script
+- Scene
+- Camera
 
-## Keyboard shortcuts
-- open / close app with shortcut defined in settings under 'App toggle'
-- buttons can be toggled with eg. ALT + 1,2,3,4 etc - you can choose your prefered modifier in settings.
-- if you want custom keyboard shortcuts for any button, it can be toggled and configurated in add/edit button menu.
+## Keyboard Shortcuts
+- **Open / Close App**: Use the shortcut defined in Settings under 'App toggle'.
+- **Toggle Buttons**: Use `Alt + 1-9` (or your preferred modifier key set in Settings).
+- **Custom Shortcuts**: Define custom shortcuts for any button via the Add/Edit menu.
 
-## How to use (light)
-- click on button to toggle
-- hold button to open dimmer
+## How to Use (Lights)
+- **Click**: Toggle the light on/off.
+- **Hold (Long Press)**: Open the dimmer overlay for brightness control.
 
 ## Installation
 
@@ -45,12 +46,15 @@ You can also download the standalone `.exe` if you prefer not to install anythin
 If you want to modify the code or run it manually:
 
 1. Clone this repository.
-2. Install the dependencies:
+   ```bash
+   pip install -r requirements.txt
    ```
-   pip install PyQt6 requests websocket-client
+   Or manually:
+   ```bash
+   pip install PyQt6 pystray aiohttp Pillow requests pynput winotify keyring
    ```
 3. Run the application:
-   ```
+   ```bash
    python main.py
    ```
 

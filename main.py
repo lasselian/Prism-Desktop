@@ -1,5 +1,5 @@
 """
-Prism Desktop - Home Assistant Tray Application
+Prism - Home Assistant Tray Application
 Main entry point and application controller.
 """
 
@@ -8,9 +8,20 @@ import json
 import time
 from pathlib import Path
 from typing import Optional
+import logging
+
+# Configure Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
 
-from utils import get_config_path
+
+from core.utils import get_config_path
 import keyring
 import copy
 
@@ -19,18 +30,19 @@ KEY_TOKEN = "ha_token"
 
 from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
 from PyQt6.QtCore import QObject, pyqtSignal, QTimer, pyqtSlot, QThread, QThreadPool, QRunnable
+from PyQt6.QtGui import QPixmap
 
-from theme_manager import ThemeManager
-from ha_client import HAClient
-from ha_websocket import HAWebSocket, WebSocketThread
-from dashboard import Dashboard
-from worker_threads import EntityFetchThread
-from tray_manager import TrayManager
-from notifications import NotificationManager
-from input_manager import InputManager
-from icons import load_mdi_font
+from ui.theme_manager import ThemeManager
+from core.ha_client import HAClient
+from core.ha_websocket import HAWebSocket, WebSocketThread
+from ui.dashboard import Dashboard
+from core.worker_threads import EntityFetchThread
+from ui.tray_manager import TrayManager
+from services.notifications import NotificationManager
+from services.input_manager import InputManager
+from ui.icons import load_mdi_font
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 class ServiceCallSignals(QObject):
     """Signals for ServiceCallRunnable."""
@@ -56,7 +68,11 @@ class ServiceCallRunnable(QRunnable):
             result = self.client.call_service(
                 self.domain, self.service, self.entity_id, self.data
             )
-            self.signals.call_complete.emit(result)
+            if not result:
+                 # If call_service returned False (e.g. 404 or 500), we should know
+                 raise Exception("Service call failed (HTTP Error)")
+            
+            self.signals.call_complete.emit(True)
         except Exception as e:
             print(f"Service call error: {e}")
             self.signals.call_complete.emit(False)
@@ -84,6 +100,131 @@ class StateFetchThread(QThread):
                     print(f"Error fetching {entity_id}: {e}")
         except Exception as e:
             print(f"State fetch error: {e}")
+
+
+class CameraFetchThread(QThread):
+    """Fetches camera images in a background thread."""
+    
+    image_fetched = pyqtSignal(str, bytes)  # entity_id, image_bytes
+    
+    def __init__(self, client: HAClient, entity_ids: list):
+        super().__init__()
+        self.client = client
+        self.entity_ids = entity_ids
+    
+    def run(self):
+        """Fetch camera images."""
+        for entity_id in self.entity_ids:
+            try:
+                # Use get_camera_image from client
+                image_bytes = self.client.get_camera_image(entity_id)
+                if image_bytes:
+                    print(f"Fetched camera image for {entity_id} ({len(image_bytes)} bytes)")
+                    self.image_fetched.emit(entity_id, image_bytes)
+            except Exception as e:
+                print(f"Error fetching camera {entity_id}: {e}")
+
+class CameraStreamThread(QThread):
+    """
+    Streams MJPEG from a camera in a background thread.
+    Parses the multipart stream to extract JPEG frames.
+    """
+    
+    image_fetched = pyqtSignal(str, bytes)
+    
+    def __init__(self, client: HAClient, entity_id: str):
+        super().__init__()
+        self.client = client
+        self.entity_id = entity_id
+        self._running = True
+    
+    def stop(self):
+        self._running = False
+        self.wait()
+    
+    def run(self):
+        """Connect to stream and parse MJPEG; fallback to polling if stream fails."""
+        print(f"Starting Live Thread for {self.entity_id}")
+        
+        while self._running:
+            # 1. Attempt Streaming
+            try:
+                response = self.client.stream_camera(self.entity_id)
+                if response and response.status_code == 200:
+                    print(f"Stream connected for {self.entity_id}")
+                    chunk_count = 0
+                    buffer = b""
+                    
+                    for chunk in response.iter_content(chunk_size=4096):
+                        if not self._running:
+                            break
+                        
+                        chunk_count += 1
+                        buffer += chunk
+                        
+                        while True:
+                            start = buffer.find(b'\xff\xd8')
+                            end = buffer.find(b'\xff\xd9')
+                            
+                            if start != -1 and end != -1 and end > start:
+                                jpg_data = buffer[start:end+2]
+                                self.image_fetched.emit(self.entity_id, jpg_data)
+                                buffer = buffer[end+2:]
+                            else:
+                                break
+                                
+                        # Safety limit
+                        if len(buffer) > 5 * 1024 * 1024:
+                             buffer = b""
+
+                    # Stream ended (expected if connection closed)
+                    print(f"Stream ended for {self.entity_id} after {chunk_count} chunks")
+                    
+                    if chunk_count > 10:
+                        # Logic: If successfully streamed > 10 chunks, retry streaming immediately.
+                        # It might just be network blip.
+                        time.sleep(1)
+                        continue
+                    else:
+                        # < 10 chunks = immediate failure. Switching to Fallback Polling.
+                        print(f"Stream unstable/unsupported for {self.entity_id}, switching to Polling Fallback")
+                else:
+                    print(f"Stream connection failed for {self.entity_id}, switching to Polling Fallback")
+            
+            except Exception as e:
+                print(f"Stream error for {self.entity_id}: {e}")
+                
+            # 2. Fallback Polling (Run this loop until stopped or retry interval passed)
+            # Actually, let's just use polling if streaming failed immediately.
+            # We'll retry streaming every 60s maybe? Or just stick to polling.
+            # Let's stick to polling for now as it's robust.
+            
+            poll_start = time.time()
+            while self._running:
+                try:
+                    # Fetch Snapshot
+                    img = self.client.get_camera_image(self.entity_id)
+                    if img:
+                        self.image_fetched.emit(self.entity_id, img)
+                    
+                    # Sleep consistent with desired FPS (e.g. 0.5 FPS = 2.0s)
+                    # Reduced from 10 FPS to save resources as per audit
+                    time.sleep(2.0) 
+                    
+                except Exception as e:
+                    print(f"Polling error for {self.entity_id}: {e}")
+                    time.sleep(2.0) # Error backoff
+                
+                # Retry streaming after 60s of polling?
+                # Uncomment to retry:
+                # if time.time() - poll_start > 60:
+                #     break 
+            
+            # If polling loop breaks (e.g. for retry), outer loop continues to Try Streaming again.
+            if not self._running:
+                break
+                
+        print(f"Live Thread stopped for {self.entity_id}")
 
 
 class PrismDesktopApp(QObject):
@@ -126,6 +267,22 @@ class PrismDesktopApp(QObject):
         self._last_click_time: dict[str, float] = {}  # entity_id -> timestamp
         self._click_cooldown = 0.5
         
+        # Camera refresh
+        self._picture_thread: Optional[CameraFetchThread] = None
+        # Map entity_id -> CameraStreamThread
+        self._stream_threads: dict[str, CameraStreamThread] = {}
+        
+        self._camera_timer = QTimer()
+        self._camera_timer.timeout.connect(self._refresh_picture_cameras)
+        self._camera_refresh_interval = 10000  # 10 seconds for picture mode
+        
+        # Stream camera refresh (NO LONGER USED as streams are continuous)
+        # We keep the timer object just in case cleaner removal is needed or for watchdog
+        # But effectively we won't start it.
+        # self._stream_camera_timer = QTimer() 
+        # self._stream_camera_timer.timeout.connect(self._refresh_stream_cameras)
+        # self._stream_refresh_interval = 1000  # 1 second for stream mode
+        
         # Initialize
         self.init_theme()
         self.init_ha_client()
@@ -167,7 +324,12 @@ class PrismDesktopApp(QObject):
                             keyring.set_password(SERVICE_NAME, KEY_TOKEN, token_in_file)
                             # Verify it saved?
                             if keyring.get_password(SERVICE_NAME, KEY_TOKEN) == token_in_file:
-                                print("Migration successful. Token will be removed from file on save.")
+                                print("Migration successful. Scrubbing token from file immediately.")
+                                # Important: Remove from file immediately
+                                ha_config['token'] = '' 
+                                self.save_config()
+                                # Restore to memory for use
+                                ha_config['token'] = token_in_file
                         except Exception as e:
                             print(f"Migration failed: {e}")
                             # Keep token in config object so app works, but it remains in file for now.
@@ -197,15 +359,13 @@ class PrismDesktopApp(QObject):
                 # Save to keyring
                 try:
                     keyring.set_password(SERVICE_NAME, KEY_TOKEN, token)
-                    # Remove from file payload
+                    # Successfully saved to keyring, so remove from file payload
                     ha_config['token'] = '' 
                 except Exception as e:
                     print(f"Keyring write error: {e}")
-                    # If keyring fails, we might fall back to saving plaintext?
-                    # For now, let's keep it in file if keyring fails, 
-                    # BUT ideally we shouldn't.
-                    # Decision: If keyring fails, we leave it in 'token' field so user can still use app.
-                    pass
+                    # FAIL SECURE: Do NOT write token to file even if keyring fails.
+                    # User will have to re-login if keyring is broken, but we don't leak credentials.
+                    ha_config['token'] = '' 
             
             with open(self.config_path, 'w', encoding='utf-8') as f:
                 json.dump(config_to_save, f, indent=2)
@@ -236,12 +396,14 @@ class PrismDesktopApp(QObject):
         self.dashboard.button_clicked.connect(self.on_button_clicked)
         self.dashboard.add_button_clicked.connect(self.on_edit_button_requested) # Open editor on add
         self.dashboard.edit_button_requested.connect(self.on_edit_button_requested)
+        self.dashboard.duplicate_button_requested.connect(self.on_duplicate_button_requested)
         self.dashboard.clear_button_requested.connect(self.on_clear_button_requested)
         self.dashboard.buttons_reordered.connect(self.on_buttons_reordered)
         self.dashboard.climate_value_changed.connect(self.on_climate_value_changed)  # Climate control
         self.dashboard.settings_saved.connect(self._on_embedded_settings_saved)  # Embedded settings
         self.dashboard.rows_changed.connect(self.fetch_initial_states)  # Refresh states after row change
         self.dashboard.edit_button_saved.connect(self.on_edit_button_saved) # Embedded button editor
+        self.dashboard.save_config_requested.connect(self.save_config) # Save layout changes (resize)
         
         # Initialize embedded SettingsWidget
         self.dashboard._init_settings_widget(self.config, self.input_manager)
@@ -356,6 +518,22 @@ class PrismDesktopApp(QObject):
         self.stop_websocket()
         self.stop_fetch_thread()
         self.stop_entity_list_thread()
+        
+        # Stop camera threads
+        if self._picture_thread:
+            if self._picture_thread.isRunning():
+                self._picture_thread.quit()
+                self._picture_thread.wait(100)
+            self._picture_thread.deleteLater()
+            self._picture_thread = None
+            
+        # Stop all stream threads
+        for entity_id, thread in list(self._stream_threads.items()):
+            if thread.isRunning():
+                thread.stop()
+            thread.deleteLater()
+        self._stream_threads.clear()
+            
         # Thread pool handles its own cleanup on exit usually, or we can clear:
         self.thread_pool.clear()
         
@@ -580,10 +758,20 @@ class PrismDesktopApp(QObject):
                 domain, action, entity_id,
                 service_data
             )
-            # You can connect signals if you need feedback:
-            runnable.signals.call_complete.connect(lambda success: print(f"Service call result: {success}"))
-            
             self.thread_pool.start(runnable)
+            
+            # Connect for feedback
+            def handle_service_result(success):
+                if not success:
+                    # Use existing notification manager if available, or just print
+                    if hasattr(self, 'notification_manager'):
+                        self.notification_manager.show_error(
+                            "Action Failed", 
+                            f"Failed to call {domain}.{action} for {entity_id}"
+                        )
+                    print(f"Service call failed for {entity_id}")
+
+            runnable.signals.call_complete.connect(handle_service_result)
     
     @pyqtSlot(str, float)
     def on_climate_value_changed(self, entity_id: str, temperature: float):
@@ -611,31 +799,6 @@ class PrismDesktopApp(QObject):
         # We can re-route or keep separate if needed, but logic is same
         self.on_edit_button_requested(slot)
     
-    @pyqtSlot(int, int)
-    def on_buttons_reordered(self, source: int, target: int):
-        """Handle button reordering via drag and drop."""
-        print(f"Reordering buttons: {source} -> {target}")
-        buttons = self.config.get('buttons', [])
-        
-        # Find buttons in source and target slots list
-        source_btn = next((b for b in buttons if b.get('slot') == source), None)
-        target_btn = next((b for b in buttons if b.get('slot') == target), None)
-        
-        # Update slots logic config
-        if source_btn:
-            source_btn['slot'] = target
-        if target_btn:
-            target_btn['slot'] = source
-            
-        # Save and update logic
-        self.save_config()
-        if self.dashboard:
-            self.dashboard.set_buttons(buttons)
-        
-        # Refresh states for new positions
-        self.fetch_initial_states()
-
-
 
     @pyqtSlot(int)
     def on_edit_button_requested(self, slot: int):
@@ -666,6 +829,44 @@ class PrismDesktopApp(QObject):
         if self.dashboard:
             self.dashboard.show_edit_button(slot, config, entities)
             
+    @pyqtSlot(int)
+    def on_duplicate_button_requested(self, slot: int):
+        """Handle request to duplicate a button."""
+        buttons = self.config.get('buttons', [])
+        
+        # Find source config
+        source_config = next((b for b in buttons if b.get('slot') == slot), None)
+        if not source_config:
+            return
+            
+        # Find first empty slot (visual)
+        if self.dashboard:
+            span_x = source_config.get('span_x', 1)
+            span_y = source_config.get('span_y', 1)
+            target_slot = self.dashboard.get_first_empty_slot(span_x, span_y)
+        else:
+            # Fallback (shouldn't happen)
+            target_slot = -1
+
+        
+        if target_slot == -1:
+            print("No empty slots available to duplicate button.")
+            return
+
+        # Create copy of config
+        new_config = source_config.copy()
+        new_config['slot'] = target_slot
+        
+        # Add to buttons list
+        buttons.append(new_config)
+        self.config['buttons'] = buttons
+        
+        # Save and refresh
+        self.save_config()
+        if self.dashboard:
+            self.dashboard.set_buttons(buttons, self.config.get('appearance', {}))
+            self.fetch_initial_states()
+
     @pyqtSlot(dict)
     def on_edit_button_saved(self, new_config: dict):
         """Handle button config saved from embedded editor."""
@@ -686,14 +887,13 @@ class PrismDesktopApp(QObject):
     @pyqtSlot(int, int)
     def on_buttons_reordered(self, source: int, target: int):
         """Handle button reordering via drag and drop."""
-        print(f"Reordering buttons: {source} -> {target}")
         buttons = self.config.get('buttons', [])
         
         # Find buttons in source and target slots
         source_btn = next((b for b in buttons if b.get('slot') == source), None)
         target_btn = next((b for b in buttons if b.get('slot') == target), None)
         
-        # Update slots
+        # Update slots (swap)
         if source_btn:
             source_btn['slot'] = target
         if target_btn:
@@ -779,6 +979,82 @@ class PrismDesktopApp(QObject):
     def _on_fetch_finished(self):
         """Handle fetch thread completion."""
         print("Initial state fetch complete")
+        # Start camera refresh after initial states are loaded
+        self._start_camera_refresh()
+    
+    def _start_camera_refresh(self):
+        """Start the camera refresh timers."""
+        # Picture mode cameras (10s refresh)
+        picture_ids = self._get_camera_entity_ids('picture')
+        if picture_ids:
+            print(f"Starting picture refresh for: {picture_ids}")
+            self._refresh_picture_cameras()
+            self._camera_timer.start(self._camera_refresh_interval)
+        else:
+            self._camera_timer.stop()
+        
+        # Stream mode cameras (Start continuous threads)
+        stream_ids = self._get_camera_entity_ids('stream')
+        
+        # 1. Start new streams
+        for entity_id in stream_ids:
+            if entity_id not in self._stream_threads:
+                print(f"Starting stream thread for {entity_id}")
+                thread = CameraStreamThread(self.ha_client, entity_id)
+                thread.image_fetched.connect(self._on_camera_image_fetched)
+                thread.start()
+                self._stream_threads[entity_id] = thread
+        
+        # 2. Stop removed streams
+        for entity_id in list(self._stream_threads.keys()):
+            if entity_id not in stream_ids:
+                print(f"Stopping stream thread for {entity_id}")
+                thread = self._stream_threads.pop(entity_id)
+                thread.stop()
+                thread.deleteLater()
+    
+    def _get_camera_entity_ids(self, mode: str = 'picture') -> list:
+        """Get list of camera entity IDs from button config by mode."""
+        camera_ids = []
+        for btn in self.config.get('buttons', []):
+            if btn.get('type') == 'camera':
+                btn_mode = btn.get('camera_mode', 'picture')
+                if btn_mode == mode:
+                    entity_id = btn.get('entity_id')
+                    if entity_id:
+                        camera_ids.append(entity_id)
+        return camera_ids
+    
+    def _refresh_picture_cameras(self):
+        """Fetch picture mode camera images (10s interval)."""
+        camera_ids = self._get_camera_entity_ids('picture')
+        if not camera_ids:
+            return
+            
+        # Cleanup previous picture thread
+        if self._picture_thread:
+            if self._picture_thread.isRunning():
+                # If it's still running, we skip this cycle to avoid buildup
+                # or we could try to stop it, but skipping is safer for 10s interval
+                return 
+            self._picture_thread.deleteLater()
+            self._picture_thread = None
+        
+        self._picture_thread = CameraFetchThread(self.ha_client, camera_ids)
+        self._picture_thread.image_fetched.connect(self._on_camera_image_fetched)
+        self._picture_thread.start()
+    
+    def _remove_stream_refresh_method(self):
+        # Placeholder to remove the old method cleanly via replacement
+        pass
+    
+    @pyqtSlot(str, bytes)
+    def _on_camera_image_fetched(self, entity_id: str, image_bytes: bytes):
+        """Handle fetched camera image."""
+        if self.dashboard:
+            pixmap = QPixmap()
+            if pixmap.loadFromData(image_bytes):
+                self.dashboard.update_camera_image(entity_id, pixmap)
     
     def check_first_run(self):
         """Show settings if no configuration exists."""

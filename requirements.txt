@@ -5,3 +5,4 @@ Pillow>=10.0.0
 winotify>=1.1.0; sys_platform == 'win32'
 pynput>=1.7.6
 requests>=2.31.0
+keyring>=24.0.0

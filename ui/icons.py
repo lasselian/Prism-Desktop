@@ -9,7 +9,7 @@ import re
 import urllib.request
 import ssl
 from PyQt6.QtGui import QFontDatabase, QFont
-from utils import get_resource_path, get_config_path
+from core.utils import get_resource_path, get_config_path
 
 # Icon font name (after loading)
 MDI_FONT_FAMILY = "Material Design Icons"
@@ -106,6 +106,10 @@ class Icons:
     # Empty/placeholder
     CIRCLE_OUTLINE = "\U000F0766"      # mdi-circle-outline
     CHECKBOX_BLANK_CIRCLE_OUTLINE = "\U000F0130"
+    
+    # Camera
+    CAMERA = "\U000F0024"              # mdi-camera
+    VIDEO = "\U000F0567"               # mdi-video
 
 
 # --- MDI Mapping Logic ---

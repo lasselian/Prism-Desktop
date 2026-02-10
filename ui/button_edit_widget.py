@@ -17,6 +17,18 @@ class ButtonEditWidget(QWidget):
     Uses the same design style as SettingsWidgetV2.
     """
     
+    # (Display Label, Internal Type) - Alphabetically sorted by label
+    TYPE_DEFINITIONS = [
+        ("Camera", "camera"),
+        ("Climate", "climate"),
+        ("Cover", "curtain"),
+        ("Light / Switch", "switch"),
+        ("Scene", "scene"),
+        ("Script", "script"),
+        ("Sensor", "widget"),
+        ("Weather", "weather")
+    ]
+    
     saved = pyqtSignal(dict)
     cancelled = pyqtSignal()
     
@@ -166,7 +178,7 @@ class ButtonEditWidget(QWidget):
         header_layout.setContentsMargins(0, 0, 0, 10)
         
         self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setFixedWidth(70)
+        self.cancel_btn.setMinimumWidth(70)
         self.cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_btn.clicked.connect(self.cancelled.emit)
         
@@ -177,7 +189,7 @@ class ButtonEditWidget(QWidget):
         
         self.save_btn = QPushButton("Save")
         self.save_btn.setObjectName("primaryBtn")
-        self.save_btn.setFixedWidth(70)
+        self.save_btn.setMinimumWidth(70)
         self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.save_btn.clicked.connect(self.save)
         
@@ -200,7 +212,7 @@ class ButtonEditWidget(QWidget):
         self.form.addRow("Label:", self.label_input)
         
         self.type_combo = QComboBox()
-        self.type_combo.addItems(["Light / Switch", "Sensor Widget", "Climate", "Curtain", "Script", "Scene"])
+        self.type_combo.addItems([t[0] for t in self.TYPE_DEFINITIONS])
         self.type_combo.currentIndexChanged.connect(self.on_type_changed)
         self.form.addRow("Type:", self.type_combo)
         
@@ -231,14 +243,27 @@ class ButtonEditWidget(QWidget):
         self.service_combo.addItems(["toggle", "turn_on", "turn_off"])
         self.form.addRow(self.service_label, self.service_combo)
         
+        # Camera Display Mode (Camera Only)
+        self.camera_mode_label = QLabel("Display:")
+        self.camera_mode_combo = QComboBox()
+        self.camera_mode_combo.addItems(["Picture", "Live Stream"])
+        self.camera_mode_combo.setToolTip("Picture refreshes periodically, Live Stream is continuous")
+        self.camera_mode_combo.setVisible(False)
+        self.camera_mode_label.setVisible(False)
+        self.form.addRow(self.camera_mode_label, self.camera_mode_combo)
+        
+        # Camera Size (Removed - handled by drag resize)
+        # self.camera_size_label = QLabel("Size:")
+        # self.camera_size_combo = QComboBox() ...
+        
         # --- Appearance Section ---
-        # --- Appearance Section ---
-        self._add_section_header("APPEARANCE")
+        self.appearance_header = self._add_section_header("APPEARANCE")
         
         # Icon Input
         self.icon_input = QLineEdit()
         self.icon_input.setPlaceholderText("e.g. mdi:lightbulb")
         self.form.addRow("Icon:", self.icon_input)
+        self.icon_label = self.form.labelForField(self.icon_input)
         
         # Color Picker
         color_widget = QWidget()
@@ -272,6 +297,8 @@ class ButtonEditWidget(QWidget):
             
         color_layout.addStretch()
         self.form.addRow("Color:", color_widget)
+        self.color_widget = color_widget
+        self.color_label = self.form.labelForField(color_widget)
         
         # --- Shortcut Section ---
         self._add_section_header("SHORTCUT")
@@ -317,6 +344,7 @@ class ButtonEditWidget(QWidget):
         lbl = QLabel(text)
         lbl.setObjectName("sectionHeader")
         self.form.addRow(lbl)
+        return lbl
 
     def populate_entities(self):
         """Fill entity dropdown based on the selected button type."""
@@ -328,20 +356,19 @@ class ButtonEditWidget(QWidget):
         
         # Determine allowed domains based on selected type
         type_idx = self.type_combo.currentIndex()
-        if type_idx == 0:  # Switch
-            allowed_domains = {'light', 'switch', 'input_boolean'}
-        elif type_idx == 1:  # Sensor Widget
-            allowed_domains = {'sensor', 'binary_sensor'}
-        elif type_idx == 2:  # Climate
-            allowed_domains = {'climate'}
-        elif type_idx == 3:  # Curtain
-            allowed_domains = {'cover'}
-        elif type_idx == 4:  # Script
-            allowed_domains = {'script'}
-        elif type_idx == 5:  # Scene
-            allowed_domains = {'scene'}
-        else:
-            allowed_domains = None  # Show all
+        current_type = self.TYPE_DEFINITIONS[type_idx][1] if 0 <= type_idx < len(self.TYPE_DEFINITIONS) else None
+        
+        domain_map = {
+            'switch': {'light', 'switch', 'input_boolean'},
+            'widget': {'sensor', 'binary_sensor'},
+            'climate': {'climate'},
+            'curtain': {'cover'},
+            'script': {'script'},
+            'scene': {'scene'},
+            'camera': {'camera'},
+            'weather': {'weather'}
+        }
+        allowed_domains = domain_map.get(current_type)
         
         # Group by domain (filtered)
         domains = {}
@@ -370,8 +397,7 @@ class ButtonEditWidget(QWidget):
                 self.entity_combo.setCurrentIndex(idx)
 
     def on_type_changed(self, index):
-        types = ["switch", "widget", "climate", "curtain", "script", "scene"]
-        current_type = types[index]
+        current_type = self.TYPE_DEFINITIONS[index][1] if 0 <= index < len(self.TYPE_DEFINITIONS) else 'switch'
 
         # Show/Hide fields based on type
         self.advanced_mode_check.setVisible(current_type == 'climate')
@@ -382,9 +408,18 @@ class ButtonEditWidget(QWidget):
         is_sensor = current_type == 'widget'
         self.precision_spin.setVisible(is_sensor)
         
+        # Show camera-specific controls
+        is_camera = current_type == 'camera'
+        self.camera_mode_combo.setVisible(is_camera)
+        self.camera_mode_label.setVisible(is_camera)
+        # self.camera_size_combo.setVisible(is_camera)
+        # self.camera_size_label.setVisible(is_camera)
+        
+        # Disable appearance section for camera (no icon/color needed)
+        self._set_appearance_enabled(not is_camera)
+        
         # Find the label associated with the widget and hide it too.
         # Layouts don't automatically hide labels for hidden widgets.
-        # Simple hack: iterate rows regarding precision
         if self.form.labelForField(self.precision_spin):
              self.form.labelForField(self.precision_spin).setVisible(is_sensor)
              
@@ -393,6 +428,25 @@ class ButtonEditWidget(QWidget):
         
         # Refresh entity list for the new type
         self.populate_entities()
+    
+    def _set_appearance_enabled(self, enabled: bool):
+        """Enable or disable appearance section widgets."""
+        # Grey out appearance header
+        if hasattr(self, 'appearance_header') and self.appearance_header:
+            self.appearance_header.setEnabled(enabled)
+        
+        # Icon input and label
+        self.icon_input.setEnabled(enabled)
+        if hasattr(self, 'icon_label') and self.icon_label:
+            self.icon_label.setEnabled(enabled)
+        
+        # Color widget and label
+        if hasattr(self, 'color_widget'):
+            self.color_widget.setEnabled(enabled)
+            for btn, _ in self.color_buttons:
+                btn.setEnabled(enabled)
+        if hasattr(self, 'color_label') and self.color_label:
+            self.color_label.setEnabled(enabled)
         
     def select_color(self, color_hex):
         self.selected_color = color_hex
@@ -413,8 +467,10 @@ class ButtonEditWidget(QWidget):
         self.label_input.setText(self.config.get('label', ''))
         self.icon_input.setText(self.config.get('icon', ''))
         
-        types = {'switch': 0, 'widget': 1, 'climate': 2, 'curtain': 3, 'script': 4, 'scene': 5}
-        self.type_combo.setCurrentIndex(types.get(self.config.get('type'), 0))
+        # Find index by internal type name
+        config_type = self.config.get('type', 'switch')
+        type_idx = next((i for i, t in enumerate(self.TYPE_DEFINITIONS) if t[1] == config_type), 0)
+        self.type_combo.setCurrentIndex(type_idx)
         
         eid = self.config.get('entity_id', '')
         if eid:
@@ -435,7 +491,16 @@ class ButtonEditWidget(QWidget):
         # Precision
         self.precision_spin.setValue(self.config.get('precision', 1))
         
+        # Camera settings
+        camera_mode = self.config.get('camera_mode', 'picture')
+        self.camera_mode_combo.setCurrentIndex(0 if camera_mode == 'picture' else 1)
+        # Start with default size or existing config, implicit
+        # camera_size = self.config.get('camera_size', 1)
+        
         self.select_color(self.config.get('color', '#4285F4'))
+        
+        # Trigger type-specific UI updates
+        self.on_type_changed(self.type_combo.currentIndex())
         
         # Shortcut
         shortcut = self.config.get('custom_shortcut', {})
@@ -457,8 +522,8 @@ class ButtonEditWidget(QWidget):
         new_config['slot'] = self.slot
         new_config['label'] = self.label_input.text().strip()
         
-        types = ["switch", "widget", "climate", "curtain", "script", "scene"]
-        new_config['type'] = types[self.type_combo.currentIndex()]
+        type_idx = self.type_combo.currentIndex()
+        new_config['type'] = self.TYPE_DEFINITIONS[type_idx][1] if 0 <= type_idx < len(self.TYPE_DEFINITIONS) else 'switch'
         
         # Extract ID from entity_id (e.g., "light.kitchen_light (Kitchen Light)" -> "light.kitchen_light")
         entity_text = self.entity_combo.currentText()
@@ -472,6 +537,14 @@ class ButtonEditWidget(QWidget):
         
         if new_config['type'] == 'widget':
             new_config['precision'] = self.precision_spin.value()
+        
+        if new_config['type'] == 'camera':
+            new_config['camera_mode'] = 'picture' if self.camera_mode_combo.currentIndex() == 0 else 'stream'
+            # Preserve existing size/span if set, otherwise default to 1x1 during creation
+            if 'span_x' not in new_config: new_config['span_x'] = 1
+            if 'span_y' not in new_config: new_config['span_y'] = 1
+            # Sync camera_size to span for compatibility
+            new_config['camera_size'] = new_config['span_x']
              
         new_config['icon'] = self.icon_input.text().strip()
         new_config['color'] = self.selected_color

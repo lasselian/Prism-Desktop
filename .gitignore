@@ -5,7 +5,10 @@ config.json
 dist/
 build/
 installer/
+AppDir/
 *.spec
+*.AppImage
+appimagetool*
 
 # Python
 __pycache__/

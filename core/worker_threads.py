@@ -5,7 +5,7 @@ Worker Threads for Prism Desktop
 import logging
 import asyncio # Keep in case other threads need it, but removing from these specific ones
 from PyQt6.QtCore import QThread, pyqtSignal
-from ha_client import HAClient
+from core.ha_client import HAClient
 
 class EntityFetchThread(QThread):
     """Background thread for fetching entities."""

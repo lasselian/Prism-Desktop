@@ -3,6 +3,19 @@ import os
 import platform
 from pathlib import Path
 
+# Cross-platform system font
+def get_system_font() -> str:
+    """Get the appropriate system UI font for the current platform."""
+    system = platform.system()
+    if system == 'Windows':
+        return 'Segoe UI'
+    elif system == 'Darwin':
+        return 'SF Pro Display'
+    else:  # Linux
+        return 'Ubuntu'
+
+SYSTEM_FONT = get_system_font()
+
 def get_resource_path(relative_path: str) -> Path:
     """
     Get absolute path to a resource, works for dev and for PyInstaller.
@@ -19,7 +32,8 @@ def get_resource_path(relative_path: str) -> Path:
         return Path(base_path) / relative_path
     except Exception:
         # Dev mode: use current directory
-        return Path(__file__).parent / relative_path
+        # Dev mode: use project root (parent of core)
+        return Path(__file__).parent.parent / relative_path
 
 
 def get_platform_config_dir() -> Path:
@@ -73,4 +87,5 @@ def get_config_path(filename: str = "config.json") -> Path:
         return app_data / filename
     else:
         # Dev mode: config sits with source code
-        return Path(__file__).parent / filename
+        # Dev mode: config sits in project root
+        return Path(__file__).parent.parent / filename

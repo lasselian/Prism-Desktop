@@ -4,10 +4,13 @@ Handles real-time state updates and notifications.
 """
 
 import asyncio
+import time
 import json
 import aiohttp
 from typing import Optional
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
+import threading
+import logging
 
 
 class HAWebSocket(QObject):
@@ -29,11 +32,14 @@ class HAWebSocket(QObject):
         self._running = False
         self._message_id = 0
         self._subscribed_entities: set[str] = set()
+        self._config_lock = threading.Lock()
+        self.logger = logging.getLogger(__name__)
     
     def configure(self, url: str, token: str):
-        """Update connection settings."""
-        self.url = url.rstrip('/')
-        self.token = token
+        """Update connection settings thread-safely."""
+        with self._config_lock:
+            self.url = url.rstrip('/')
+            self.token = token
     
     def subscribe_entity(self, entity_id: str):
         """Add entity to subscription list."""
@@ -63,11 +69,16 @@ class HAWebSocket(QObject):
     
     async def connect(self):
         """Connect to Home Assistant WebSocket."""
-        if not self.url or not self.token:
+        # Capture config under lock
+        with self._config_lock:
+            current_url = self.url
+            current_token = self.token
+            
+        if not current_url or not current_token:
             self.error.emit("URL and token are required")
             return
         
-        ws_url = self.url.replace('http://', 'ws://').replace('https://', 'wss://')
+        ws_url = current_url.replace('http://', 'ws://').replace('https://', 'wss://')
         ws_url = f"{ws_url}/api/websocket"
         
         try:
@@ -83,7 +94,7 @@ class HAWebSocket(QObject):
             # Send auth
             await self._send({
                 "type": "auth",
-                "access_token": self.token
+                "access_token": current_token
             })
             
             # Wait for auth_ok
@@ -225,35 +236,68 @@ class WebSocketThread(QThread):
     def __init__(self, ws_client: HAWebSocket):
         super().__init__()
         self.ws_client = ws_client
+        self.logger = logging.getLogger(__name__)
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stop_requested = False
     
     def run(self):
-        """Run the WebSocket client in this thread."""
+        """Run the WebSocket client with auto-reconnection."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         
+        backoff = 1
+        max_backoff = 30
+        
         try:
-            self._loop.run_until_complete(self.ws_client.connect())
-        except Exception:
-            pass
+            while not self._stop_requested:
+                try:
+                    # Reset backoff on successful run (if it stays connected for a bit)
+                    start_time = time.time()
+                    
+                    # Run client connection
+                    self._loop.run_until_complete(self.ws_client.connect())
+                    
+                    # If we are here, connect() returned (disconnect or error)
+                    if self._stop_requested:
+                        break
+                        
+                    # Check if connection was short-lived (immediate failure)
+                    if time.time() - start_time > 10:
+                        backoff = 1  # Reset backoff if we were connected for >10s
+                    
+                    self.logger.warning(f"WebSocket disconnected. Reconnecting in {backoff}s...")
+                    self.ws_client.error.emit(f"Disconnected. Reconnecting in {backoff}s...")
+                    
+                    # Wait for backoff or stop
+                    # We can't use time.sleep or QThread.sleep effectively with stop signal
+                    # So we use a small loop
+                    for _ in range(backoff * 10):
+                        if self._stop_requested: break
+                        self.msleep(100)
+                        
+                    # Exponential backoff
+                    backoff = min(backoff * 2, max_backoff)
+                    
+                except Exception as e:
+                    self.logger.error(f"WebSocket Thread Error: {e}")
+                    if self._stop_requested: break
+                    self.msleep(1000)
+                    
         finally:
             try:
-                # Clean up pending tasks to avoid "Task destroyed but pending" warnings
+                # Clean up pending tasks
                 pending = asyncio.all_tasks(self._loop)
                 for task in pending:
                     task.cancel()
-                    
                 if pending:
                     self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                
                 self._loop.close()
             except:
                 pass
     
     def stop(self):
         """Stop the WebSocket thread gracefully (non-blocking)."""
-        print("WebSocketThread.stop() called")
+        self.logger.info("WebSocketThread.stop() called")
         self._stop_requested = True
         
         # Request websocket to stop
@@ -272,4 +316,3 @@ class WebSocketThread(QThread):
         
         # Signal thread to quit event loop
         self.quit()
-        # Do NOT wait() here - allow Qt cleanup to happen asynchronously

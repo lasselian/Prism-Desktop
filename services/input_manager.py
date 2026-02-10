@@ -172,59 +172,58 @@ class InputManager(QObject):
         mods = []
         char_key = None
         
-        has_ctrl = any(k.name.startswith('ctrl') for k in keys if hasattr(k, 'name'))
-        has_alt = any(k.name.startswith('alt') for k in keys if hasattr(k, 'name'))
-        has_shift = any(k.name.startswith('shift') for k in keys if hasattr(k, 'name'))
-        has_cmd = any(k.name.startswith('cmd') or k.name == 'win' for k in keys if hasattr(k, 'name'))
+        has_ctrl = any(getattr(k, 'name', '').startswith('ctrl') for k in keys)
+        has_alt = any(getattr(k, 'name', '').startswith('alt') for k in keys)
+        has_shift = any(getattr(k, 'name', '').startswith('shift') for k in keys)
+        has_cmd = any(getattr(k, 'name', '').startswith('cmd') or getattr(k, 'name', '') == 'win' for k in keys)
         
         if has_ctrl: mods.append('<ctrl>')
         if has_alt: mods.append('<alt>')
         if has_shift: mods.append('<shift>')
         if has_cmd: mods.append('<cmd>')
         
-        # Find the non-modifier key
+        potential_chars = []
+        
         for k in keys:
             if hasattr(k, 'name') and (k.name.startswith('ctrl') or k.name.startswith('alt') or k.name.startswith('shift') or k.name.startswith('cmd') or k.name =='win'):
                 continue
             
             # Found a character or other special key (e.g. F1, esc, space)
-            # Priorities:
-            # 1. k.char if it's a normal printable character (not control char)
-            # 2. k.vk mapping if it looks like a letter/digit (covers Ctrl+Key issues and missing char)
-            # 3. k.name (special keys like 'esc', 'space')
-            # 4. Fallback to str(k)
-            
             vk = getattr(k, 'vk', None)
             char = getattr(k, 'char', None)
             
             # Helper to check if VK is a standard ASCII letters/digit
-            # 48-57: 0-9
-            # 65-90: A-Z
             is_standard_vk = vk and ((48 <= vk <= 57) or (65 <= vk <= 90))
             
+            key_str = ""
             if is_standard_vk:
-                 # Check if we should prefer VK over char
-                 # If char is missing OR char is control code (<32)
                  if not char or ord(char) < 32:
-                     char_key = chr(vk).lower()
+                     key_str = chr(vk).lower()
                  else:
-                     char_key = char.lower()
+                     key_str = char.lower()
             elif char and ord(char) >= 32:
-                char_key = char.lower()
+                key_str = char.lower()
             elif hasattr(k, 'name'):
-                char_key = f"<{k.name}>"
+                key_str = f"<{k.name}>"
             else:
-                char_key = str(k)
-            break
+                key_str = str(k)
             
-        if not char_key and not mods:
+            potential_chars.append(key_str)
+            
+        if not potential_chars and not mods:
             return None
+            
+        # Sort to ensure determinism if multiple keys are pressed
+        potential_chars.sort()
+        
+        if potential_chars:
+            char_key = potential_chars[0]
             
         if not char_key: 
             # Only modifiers? Don't record yet
             return None
 
-        # Sort mods to be deterministic
+        # Sort mods to be deterministic (already done by append order above)
         # pynput order convention: <ctrl>+<alt>+<shift>+key
         
         parts = []

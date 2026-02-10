@@ -13,8 +13,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtProperty, pyqtSlot, QUrl
 from PyQt6.QtGui import QFont, QColor, QDesktopServices
 
-from worker_threads import ConnectionTestThread
-from update_checker import UpdateCheckerThread
+from core.worker_threads import ConnectionTestThread
+from services.update_checker import UpdateCheckerThread
 
 class SettingsWidget(QWidget):
     """
@@ -152,15 +152,16 @@ class SettingsWidget(QWidget):
             QPushButton#primaryBtn:hover {{ background-color: #006ce6; }}
             
             QPushButton#rowBtn {{
-                min-width: 32px;
-                max-width: 32px;
-                min-height: 26px;
-                max-height: 26px;
+                min-width: 42px;
+                max-width: 42px;
+                min-height: 32px;
+                max-height: 32px;
                 border-radius: 4px;
                 background-color: transparent;
                 border: 1px solid {colors['border']};
                 color: {colors['text']};
                 font-size: 11px;
+                padding: 0px;
             }}
             QPushButton#rowBtn:checked {{
                 background-color: {colors['accent']};
@@ -199,11 +200,11 @@ class SettingsWidget(QWidget):
             QPushButton#coffeeBtn {{
                 background-color: {colors['accent']};
                 color: white;
-                border: none;
+                border: 1px solid {colors['accent']};
                 font-weight: 500;
                 font-size: 13px;
                 border-radius: 6px;
-                padding: 8px 16px;
+                padding: 6px 12px;
             }}
             QPushButton#coffeeBtn:hover {{
                 background-color: #006ce6;
@@ -245,7 +246,7 @@ class SettingsWidget(QWidget):
         header_layout.setContentsMargins(0, 0, 0, 10)
         
         self.back_btn = QPushButton("← Back")
-        self.back_btn.setFixedWidth(70)
+        self.back_btn.setMinimumWidth(70)
         self.back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.back_btn.clicked.connect(self.back_requested.emit)
         
@@ -256,7 +257,7 @@ class SettingsWidget(QWidget):
         self.save_btn = QPushButton("Save")
         self.save_btn.setObjectName("primaryBtn")
         self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.save_btn.setFixedWidth(70)
+        self.save_btn.setMinimumWidth(70)
         self.save_btn.clicked.connect(self.save_settings)
         
         header_layout.addWidget(self.back_btn)
@@ -285,7 +286,7 @@ class SettingsWidget(QWidget):
         # Test Connection Row
         test_row = QHBoxLayout()
         self.test_btn = QPushButton("Test Connection")
-        self.test_btn.setFixedWidth(120)
+        self.test_btn.setMinimumWidth(120)
         self.test_btn.clicked.connect(self.test_connection)
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #aaa;")
@@ -301,21 +302,22 @@ class SettingsWidget(QWidget):
         # Theme
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["System", "Light", "Dark"])
-        self.theme_combo.setFixedWidth(120)
+        self.theme_combo.setMinimumWidth(120)
         self.theme_combo.currentIndexChanged.connect(self.on_theme_preview)
         self.form.addRow("Theme:", self.theme_combo)
 
         # Border Effect
         self.border_effect_combo = QComboBox()
         self.border_effect_combo.addItems(["Rainbow", "Aurora Borealis", "None"])
-        self.border_effect_combo.setFixedWidth(120)
+        self.border_effect_combo.setMinimumWidth(120)
         self.form.addRow("Border Effect:", self.border_effect_combo)
         
         # Rows (Segmented Buttons)
         rows_row = QHBoxLayout()
+        rows_row.setContentsMargins(0, 0, 0, 0)
         rows_row.setSpacing(4)
         self.row_buttons = []
-        for i in range(2, 6):  # 2, 3, 4, 5 rows
+        for i in range(2, 7):  # 2, 3, 4, 5, 6 rows
             btn = QPushButton(str(i))
             btn.setObjectName("rowBtn")
             btn.setCheckable(True)
@@ -326,10 +328,6 @@ class SettingsWidget(QWidget):
         rows_row.addStretch()
         self.form.addRow("Size:", rows_row)
         
-        # Live Dimming
-        self.live_dimming_check = QCheckBox("Enable")
-        self.live_dimming_check.setChecked(True)
-        self.form.addRow("Live Dimming:", self.live_dimming_check)
         
         # --- Shortcut Section ---
         self._add_section_header("SHORTCUT")
@@ -337,7 +335,7 @@ class SettingsWidget(QWidget):
         # Modifier
         self.modifier_combo = QComboBox()
         self.modifier_combo.addItems(["None", "Alt", "Ctrl", "Shift"])
-        self.modifier_combo.setFixedWidth(120)
+        self.modifier_combo.setMinimumWidth(120)
         self.form.addRow("Modifier:", self.modifier_combo)
         
         shortcut_row = QHBoxLayout()
@@ -403,7 +401,7 @@ class SettingsWidget(QWidget):
         self.coffee_btn = QPushButton("Buy me a coffee ☕")
         self.coffee_btn.setObjectName("coffeeBtn")
         self.coffee_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.coffee_btn.setFixedHeight(36) # Slightly taller than standard inputs
+        # self.coffee_btn.setFixedHeight(36) # Removed to match Update button size
         self.coffee_btn.clicked.connect(self.open_coffee)
         
         # Add to form layout for consistent alignment
@@ -453,7 +451,7 @@ class SettingsWidget(QWidget):
         rows = app.get('rows', 2)
         self.on_row_selected(rows)
         
-        self.live_dimming_check.setChecked(app.get('live_dimming', True))
+
         
         sc = self.config.get('shortcut', {})
         self.modifier_combo.setCurrentText(sc.get('modifier', 'Alt'))
@@ -475,7 +473,7 @@ class SettingsWidget(QWidget):
             'theme': theme_map.get(self.theme_combo.currentIndex(), 'system'),
             'border_effect': self.border_effect_combo.currentText(),
             'rows': self._selected_rows,
-            'live_dimming': self.live_dimming_check.isChecked()
+
         })
         
         # Shortcut handled by record signal, but good to ensure consistency

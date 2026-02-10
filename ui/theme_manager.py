@@ -32,7 +32,7 @@ class ThemeManager(QObject):
     
     # Light mode color palette
     LIGHT_COLORS = {
-        'window': '#f3f3f3',
+        'window': '#e0e0e0',
         'window_text': '#1e1e1e',
         'base': '#ffffff',
         'alternate_base': '#f5f5f5',
