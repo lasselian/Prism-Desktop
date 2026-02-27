@@ -47,53 +47,71 @@ class TrayManager:
             self.signals.quit_clicked.connect(on_quit)
     
     def create_icon_image(self, size: int = 64) -> Image.Image:
-        """Create a simple Home Assistant-style icon."""
-        # Create a new image with transparency
-        image = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+        """Create a stylized 'Prism Desktop' isometric cube icon."""
+        # Draw at a higher resolution and scale down for smooth antialiasing
+        scale = 4
+        canvas_size = size * scale
+        image = Image.new('RGBA', (canvas_size, canvas_size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         
-        # Colors based on theme
-        if self.theme == 'dark':
-            bg_color = (30, 30, 30, 255)
-            fg_color = (0, 120, 212, 255)  # Blue accent
-        else:
+        # Center and dimensions
+        cx = canvas_size // 2
+        cy = canvas_size // 2
+        
+        # Isometric triangle (tetrahedron from top) dimensions
+        # Increased radius to make it larger
+        radius = 28 * scale
+        h_span = int(radius * 0.866)  # cos(30)
+        v_half = int(radius * 0.5)    # sin(30)
+        
+        # 3 Points of the outer triangle + Center
+        p_center = (cx, cy)
+        p_top = (cx, cy - radius)
+        p_bot_left = (cx - h_span, cy + v_half)
+        p_bot_right = (cx + h_span, cy + v_half)
+        
+        # Colors (vibrant "Prism" palette)
+        color_left = (0, 229, 255, 255)    # Cyan
+        color_right = (213, 0, 249, 255)  # Magenta/Purple
+        color_bottom = (41, 98, 255, 255)   # Deep Blue
+        
+        # Background color
+        bg_color = (30, 30, 30, 255)
+        
+        # For light theme, darken colors slightly to ensure high contrast on white trays
+        if self.theme != 'dark':
+            color_left = (0, 180, 210, 255)
+            color_right = (180, 0, 200, 255)
+            color_bottom = (25, 60, 200, 255)
             bg_color = (255, 255, 255, 255)
-            fg_color = (0, 120, 212, 255)
+
+        # Draw rounded background
+        # Reduced padding to make the icon larger overall
+        bg_pad = 1 * scale
+        bg_radius = 10 * scale
+        if hasattr(draw, 'rounded_rectangle'):
+            draw.rounded_rectangle(
+                [bg_pad, bg_pad, canvas_size - bg_pad, canvas_size - bg_pad],
+                radius=bg_radius,
+                fill=bg_color
+            )
+        else:
+            draw.rectangle(
+                [bg_pad, bg_pad, canvas_size - bg_pad, canvas_size - bg_pad],
+                fill=bg_color
+            )
+
+        # Draw the 3 faces of the isometric triangle pyramid
+        # Left Face
+        draw.polygon([p_center, p_top, p_bot_left], fill=color_left)
+        # Right Face
+        draw.polygon([p_center, p_top, p_bot_right], fill=color_right)
+        # Bottom Face
+        draw.polygon([p_center, p_bot_left, p_bot_right], fill=color_bottom)
         
-        # Draw circular background
-        padding = 4
-        draw.ellipse(
-            [padding, padding, size - padding, size - padding],
-            fill=bg_color,
-            outline=fg_color,
-            width=3
-        )
-        
-        # Draw a simple "house" icon in the center
-        center = size // 2
-        house_size = size // 3
-        
-        # House body
-        house_left = center - house_size // 2
-        house_right = center + house_size // 2
-        house_top = center - house_size // 4
-        house_bottom = center + house_size // 2
-        
-        draw.rectangle(
-            [house_left, house_top, house_right, house_bottom],
-            fill=fg_color
-        )
-        
-        # Roof (triangle)
-        roof_peak = center - house_size // 2 - 4
-        draw.polygon(
-            [
-                (center, roof_peak),
-                (house_left - 4, house_top),
-                (house_right + 4, house_top)
-            ],
-            fill=fg_color
-        )
+        # Antialiasing downscale (compatible with modern Pillow)
+        resampler = getattr(Image, 'Resampling', Image).LANCZOS
+        image = image.resize((size, size), resampler)
         
         return image
     
@@ -118,11 +136,7 @@ class TrayManager:
                 self._emit_left_click,
                 default=True  # This makes it the action for left-click
             ),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem(
-                "Settings",
-                self._emit_settings
-            ),
+
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 "Quit",

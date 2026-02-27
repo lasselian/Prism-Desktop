@@ -19,19 +19,24 @@ class ButtonEditWidget(QWidget):
     
     # (Display Label, Internal Type) - Alphabetically sorted by label
     TYPE_DEFINITIONS = [
+        ("Automation", "automation"),
         ("Camera", "camera"),
         ("Climate", "climate"),
         ("Cover", "curtain"),
         ("Fan", "fan"),
         ("Light / Switch", "switch"),
+        ("Lock", "lock"),
+        ("Media Player", "media_player"),
         ("Scene", "scene"),
         ("Script", "script"),
         ("Sensor", "widget"),
-        ("Weather", "weather")
+        ("Weather", "weather"),
+        ("3D Printer", "3d_printer")
     ]
     
     saved = pyqtSignal(dict)
     cancelled = pyqtSignal()
+    size_changed = pyqtSignal()
     
     def __init__(self, entities: list, config: dict = None, slot: int = 0, theme_manager=None, input_manager=None, parent=None):
         super().__init__(parent)
@@ -80,21 +85,23 @@ class ButtonEditWidget(QWidget):
             input_focus_bg = "rgba(255, 255, 255, 0.12)"
             color_btn_border = "white"
             section_header_color = "#8e8e93"  # Apple gray for dark mode
+            
+        from ui.styles import Typography, Dimensions
         
         self.setStyleSheet(f"""
             QWidget {{ 
-                font-family: 'Segoe UI', 'Ubuntu', 'Noto Sans', 'DejaVu Sans', sans-serif; 
-                font-size: 13px;
+                font-family: {Typography.FONT_FAMILY_UI}; 
+                font-size: {Typography.SIZE_BODY};
                 color: {colors['text']};
             }}
             QLabel#headerTitle {{
-                font-size: 18px;
-                font-weight: 600;
+                font-size: {Typography.SIZE_HEADER};
+                font-weight: {Typography.WEIGHT_SEMIBOLD};
                 color: {colors['window_text']};
             }}
             QLabel#sectionHeader {{
-                font-size: 11px;
-                font-weight: 700;
+                font-size: {Typography.SIZE_SMALL};
+                font-weight: {Typography.WEIGHT_BOLD};
                 color: {section_header_color};
                 margin-top: 10px;
                 margin-bottom: 2px;
@@ -102,7 +109,7 @@ class ButtonEditWidget(QWidget):
             QLineEdit, QComboBox, QSpinBox {{
                 background-color: {input_bg};
                 border: 1px solid {input_border};
-                border-radius: 6px;
+                border-radius: {Dimensions.RADIUS_MEDIUM};
                 padding: 6px 10px;
                 color: {colors['text']};
                 selection-background-color: {colors['accent']};
@@ -121,9 +128,9 @@ class ButtonEditWidget(QWidget):
                 background-color: {colors['button']};
                 color: {colors['button_text']};
                 border: 1px solid {colors['border']};
-                border-radius: 6px;
-                padding: 6px 14px;
-                font-weight: 500;
+                border-radius: {Dimensions.RADIUS_MEDIUM};
+                padding: {Dimensions.PADDING_MEDIUM} {Dimensions.PADDING_LARGE};
+                font-weight: {Typography.WEIGHT_MEDIUM};
             }}
             QPushButton:hover {{ background-color: {colors['accent']}; color: white; }}
             QPushButton:pressed {{ background-color: {colors['accent']}; }}
@@ -136,7 +143,7 @@ class ButtonEditWidget(QWidget):
             QPushButton#primaryBtn:hover {{ background-color: #006ce6; }}
             
             QPushButton#colorBtn {{
-                border-radius: 4px;
+                border-radius: {Dimensions.RADIUS_SMALL};
                 border: 2px solid transparent;
             }}
             QPushButton#colorBtn:checked {{
@@ -144,20 +151,20 @@ class ButtonEditWidget(QWidget):
             }}
             
             QPushButton#recordBtn {{
-                background-color: #EA4335;
+                background-color: #C62828;
                 border: none;
-                border-radius: 6px;
+                border-radius: {Dimensions.RADIUS_MEDIUM};
             }}
             QPushButton#recordBtn:hover {{
-                background-color: #D33428;
+                background-color: #B71C1C;
             }}
             QPushButton#recordBtn:checked {{
-                background-color: #B71C1C;
+                background-color: #8E0000;
             }}
             
             QWidget#recordIcon {{
                 background-color: white;
-                border-radius: 6px;
+                border-radius: {Dimensions.RADIUS_MEDIUM};
             }}
         """)
         
@@ -210,6 +217,7 @@ class ButtonEditWidget(QWidget):
         
         self.label_input = QLineEdit()
         self.label_input.setPlaceholderText("e.g. Living Room")
+        self.label_input.returnPressed.connect(self.save)
         self.form.addRow("Label:", self.label_input)
         
         self.type_combo = QComboBox()
@@ -221,15 +229,18 @@ class ButtonEditWidget(QWidget):
         self.entity_combo.setEditable(True)
         self.entity_combo.setMaxVisibleItems(15)
         self.entity_combo.lineEdit().setPlaceholderText("Select or type entity ID...")
-        self.entity_combo.lineEdit().setPlaceholderText("Select or type entity ID...")
+        self.entity_combo.lineEdit().returnPressed.connect(self.save)
         self.populate_entities()
         self.form.addRow("Entity:", self.entity_combo)
         
-        # Advanced Mode (Climate Only)
-        self.advanced_mode_check = QCheckBox("Advanced Mode")
-        self.advanced_mode_check.setToolTip("Enable fan and mode controls")
-        self.advanced_mode_check.setVisible(False)
-        self.form.addRow("", self.advanced_mode_check)
+        # (Advanced mode toggle removed - climate now defaults to advanced)
+        
+        # Show Album Art (Media Player Only)
+        self.show_album_art_check = QCheckBox("Show Album Art")
+        self.show_album_art_check.setToolTip("Display album artwork as button background")
+        self.show_album_art_check.setChecked(True)
+        self.show_album_art_check.setVisible(False)
+        self.form.addRow("", self.show_album_art_check)
         
         # Precision (Widget/Sensor Only)
         self.precision_spin = QSpinBox()
@@ -257,12 +268,68 @@ class ButtonEditWidget(QWidget):
         # self.camera_size_label = QLabel("Size:")
         # self.camera_size_combo = QComboBox() ...
         
+        # Automation Action (Automation Only)
+        self.automation_action_label = QLabel("Action:")
+        self.automation_action_combo = QComboBox()
+        self.automation_action_combo.addItems(["Toggle", "Trigger"])
+        self.automation_action_combo.setToolTip("Toggle enables/disables the automation. Trigger runs it immediately.")
+        self.automation_action_label.setVisible(False)
+        self.automation_action_combo.setVisible(False)
+        self.form.addRow(self.automation_action_label, self.automation_action_combo)
+        
+        # Lock Action (Lock Only)
+        self.lock_action_label = QLabel("Action:")
+        self.lock_action_combo = QComboBox()
+        self.lock_action_combo.addItems(["Toggle (Smart)", "Lock", "Unlock"])
+        self.lock_action_combo.setToolTip("Toggle logic: If locked -> Unlock, If unlocked -> Lock.")
+        self.lock_action_label.setVisible(False)
+        self.lock_action_combo.setVisible(False)
+        self.form.addRow(self.lock_action_label, self.lock_action_combo)
+        
+        # 3D Printer specific fields
+        self.printer_state_label = QLabel("State Entity:")
+        self.printer_state_combo = QComboBox()
+        self.printer_state_combo.setEditable(True)
+        self.printer_state_combo.setMaxVisibleItems(15)
+        self.form.addRow(self.printer_state_label, self.printer_state_combo)
+        
+        self.printer_camera_label = QLabel("Camera Entity:")
+        self.printer_camera_combo = QComboBox()
+        self.printer_camera_combo.setEditable(True)
+        self.printer_camera_combo.setMaxVisibleItems(15)
+        self.form.addRow(self.printer_camera_label, self.printer_camera_combo)
+        
+        self.printer_nozzle_label = QLabel("Nozzle Entity:")
+        self.printer_nozzle_combo = QComboBox()
+        self.printer_nozzle_combo.setEditable(True)
+        self.printer_nozzle_combo.setMaxVisibleItems(15)
+        self.form.addRow(self.printer_nozzle_label, self.printer_nozzle_combo)
+        
+        self.printer_nozzle_target_label = QLabel("Nozzle Target Entity:")
+        self.printer_nozzle_target_combo = QComboBox()
+        self.printer_nozzle_target_combo.setEditable(True)
+        self.printer_nozzle_target_combo.setMaxVisibleItems(15)
+        self.form.addRow(self.printer_nozzle_target_label, self.printer_nozzle_target_combo)
+        
+        self.printer_bed_label = QLabel("Bed Entity:")
+        self.printer_bed_combo = QComboBox()
+        self.printer_bed_combo.setEditable(True)
+        self.printer_bed_combo.setMaxVisibleItems(15)
+        self.form.addRow(self.printer_bed_label, self.printer_bed_combo)
+        
+        self.printer_bed_target_label = QLabel("Bed Target Entity:")
+        self.printer_bed_target_combo = QComboBox()
+        self.printer_bed_target_combo.setEditable(True)
+        self.printer_bed_target_combo.setMaxVisibleItems(15)
+        self.form.addRow(self.printer_bed_target_label, self.printer_bed_target_combo)
+        
         # --- Appearance Section ---
         self.appearance_header = self._add_section_header("APPEARANCE")
         
         # Icon Input
         self.icon_input = QLineEdit()
         self.icon_input.setPlaceholderText("e.g. mdi:lightbulb")
+        self.icon_input.returnPressed.connect(self.save)
         self.form.addRow("Icon:", self.icon_input)
         self.icon_label = self.form.labelForField(self.icon_input)
         
@@ -275,10 +342,12 @@ class ButtonEditWidget(QWidget):
         self.preset_colors = [
             ("#4285F4", "Blue"),
             ("#34A853", "Green"),
-            ("#EA4335", "Red"),
-            ("#9C27B0", "Purple"),
-            ("#E91E63", "Pink"),
+            ("#B71C1C", "Red"),
+            ("#E65100", "Orange"),
+            ("#6A1B9A", "Purple"),
+            ("#AD1457", "Pink"),
             ("#607D8B", "Gray"),
+            ("#3C3C3C", "Sensor Gray"),
         ]
         
         self.color_buttons = []
@@ -290,7 +359,15 @@ class ButtonEditWidget(QWidget):
             btn.setFixedSize(24, 24)
             btn.setCheckable(True)
             btn.setToolTip(tooltip)
-            btn.setStyleSheet(f"background-color: {color_hex};")
+            if color_hex == "#3C3C3C":
+                # Special diagonal split for Sensor Gray (Dynamic)
+                btn.setStyleSheet("""
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
+                        stop:0 #ffffff, stop:0.49 #ffffff, 
+                        stop:0.51 #3c3c3c, stop:1 #3c3c3c);
+                """)
+            else:
+                btn.setStyleSheet(f"background-color: {color_hex};")
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.clicked.connect(lambda checked, c=color_hex: self.select_color(c))
             color_layout.addWidget(btn)
@@ -360,15 +437,18 @@ class ButtonEditWidget(QWidget):
         current_type = self.TYPE_DEFINITIONS[type_idx][1] if 0 <= type_idx < len(self.TYPE_DEFINITIONS) else None
         
         domain_map = {
-            'switch': {'light', 'switch', 'input_boolean'},
-            'widget': {'sensor', 'binary_sensor'},
+            'automation': {'automation'},
+            'switch': {'light', 'switch', 'input_boolean', 'input_button'},
+            'widget': {'sensor', 'binary_sensor', 'number', 'input_number'},
             'climate': {'climate'},
             'curtain': {'cover'},
             'fan': {'fan'},
+            'media_player': {'media_player'},
             'script': {'script'},
             'scene': {'scene'},
             'camera': {'camera'},
-            'weather': {'weather'}
+            'weather': {'weather'},
+            'lock': {'lock'}
         }
         allowed_domains = domain_map.get(current_type)
         
@@ -391,6 +471,14 @@ class ButtonEditWidget(QWidget):
             for eid, friendly in sorted(domains[domain], key=lambda x: x[0]):
                  self.entity_combo.addItem(eid, friendly)
                  self.entity_combo.setItemData(self.entity_combo.count()-1, friendly, Qt.ItemDataRole.ToolTipRole)
+                 
+                 # Also populate the 3D printer specific combos
+                 self.printer_state_combo.addItem(eid, friendly)
+                 self.printer_camera_combo.addItem(eid, friendly)
+                 self.printer_nozzle_combo.addItem(eid, friendly)
+                 self.printer_bed_combo.addItem(eid, friendly)
+                 self.printer_nozzle_target_combo.addItem(eid, friendly)
+                 self.printer_bed_target_combo.addItem(eid, friendly)
         
         # Try to restore previous selection
         if current_entity:
@@ -401,8 +489,8 @@ class ButtonEditWidget(QWidget):
     def on_type_changed(self, index):
         current_type = self.TYPE_DEFINITIONS[index][1] if 0 <= index < len(self.TYPE_DEFINITIONS) else 'switch'
 
-        # Show/Hide fields based on type
-        self.advanced_mode_check.setVisible(current_type == 'climate')
+        # (Advanced mode visibility logic removed)
+        self.show_album_art_check.setVisible(current_type == 'media_player')
         self.service_combo.setVisible(current_type == 'switch')
         self.service_label.setVisible(current_type == 'switch')
         
@@ -417,8 +505,58 @@ class ButtonEditWidget(QWidget):
         # self.camera_size_combo.setVisible(is_camera)
         # self.camera_size_label.setVisible(is_camera)
         
+        # Show automation specific controls
+        is_automation = current_type == 'automation'
+        self.automation_action_combo.setVisible(is_automation)
+        self.automation_action_label.setVisible(is_automation)
+
+        # Show lock specific controls
+        is_lock = current_type == 'lock'
+        self.lock_action_combo.setVisible(is_lock)
+        self.lock_action_label.setVisible(is_lock)
+        
+        # Show 3D printer specific controls
+        is_printer = current_type == '3d_printer'
+        self.printer_state_label.setVisible(is_printer)
+        self.printer_state_combo.setVisible(is_printer)
+        self.printer_camera_label.setVisible(is_printer)
+        self.printer_camera_combo.setVisible(is_printer)
+        self.printer_nozzle_label.setVisible(is_printer)
+        self.printer_nozzle_combo.setVisible(is_printer)
+        self.printer_nozzle_target_label.setVisible(is_printer)
+        self.printer_nozzle_target_combo.setVisible(is_printer)
+        self.printer_bed_label.setVisible(is_printer)
+        self.printer_bed_combo.setVisible(is_printer)
+        self.printer_bed_target_label.setVisible(is_printer)
+        self.printer_bed_target_combo.setVisible(is_printer)
+        
+        # Hide standard entity picker if 3D printer
+        self.entity_combo.setVisible(not is_printer)
+        if self.form.labelForField(self.entity_combo):
+            self.form.labelForField(self.entity_combo).setVisible(not is_printer)
+        
         # Disable appearance section for camera (no icon/color needed)
         self._set_appearance_enabled(not is_camera)
+        
+        # Icon Visibility
+        # Remove option to choose icon for sensors and 3D printers
+        show_icon = current_type not in ['widget', '3d_printer']
+        self.icon_input.setVisible(show_icon)
+        if hasattr(self, 'icon_label'):
+            self.icon_label.setVisible(show_icon)
+        
+        # Color Option Visibility
+        # Remove for Weather and Camera. Sensors (widget) now have color choice.
+        show_color = current_type not in ['weather', 'camera']
+        if hasattr(self, 'color_widget'):
+            self.color_widget.setVisible(show_color)
+        if hasattr(self, 'color_label'):
+            self.color_label.setVisible(show_color)
+            
+        # Default Color Logic for Sensors
+        # If switching to Sensor and color is default Blue, switch to Sensor Gray
+        if current_type == 'widget' and self.selected_color == "#4285F4":
+            self.select_color("#3C3C3C")
         
         # Find the label associated with the widget and hide it too.
         # Layouts don't automatically hide labels for hidden widgets.
@@ -430,6 +568,9 @@ class ButtonEditWidget(QWidget):
         
         # Refresh entity list for the new type
         self.populate_entities()
+        
+        # Notify that the layout requirements may have changed
+        self.size_changed.emit()
     
     def _set_appearance_enabled(self, enabled: bool):
         """Enable or disable appearance section widgets."""
@@ -462,7 +603,11 @@ class ButtonEditWidget(QWidget):
             self.entity_combo.setCurrentText("")
             self.label_input.clear()
             self.icon_input.clear()
-            self.type_combo.setCurrentIndex(0)
+            
+            # Default to Light / Switch (switch)
+            switch_idx = next((i for i, t in enumerate(self.TYPE_DEFINITIONS) if t[1] == 'switch'), 0)
+            self.type_combo.setCurrentIndex(switch_idx)
+            
             self.service_combo.setCurrentIndex(0)
             return
             
@@ -486,9 +631,8 @@ class ButtonEditWidget(QWidget):
         svc_idx = self.service_combo.findText(svc_name)
         if svc_idx >= 0: self.service_combo.setCurrentIndex(svc_idx)
         
-        self.advanced_mode_check.setChecked(self.config.get('advanced_mode', False))
-        
-        self.advanced_mode_check.setChecked(self.config.get('advanced_mode', False))
+        # (Advanced mode checked logic removed)
+        self.show_album_art_check.setChecked(self.config.get('show_album_art', True))
         
         # Precision
         self.precision_spin.setValue(self.config.get('precision', 1))
@@ -498,6 +642,40 @@ class ButtonEditWidget(QWidget):
         self.camera_mode_combo.setCurrentIndex(0 if camera_mode == 'picture' else 1)
         # Start with default size or existing config, implicit
         # camera_size = self.config.get('camera_size', 1)
+        
+        # Automation settings
+        automation_action = self.config.get('action', 'toggle')
+        self.automation_action_combo.setCurrentIndex(1 if automation_action == 'trigger' else 0)
+
+        # Lock settings
+        lock_action = self.config.get('action', 'toggle')
+        if lock_action == 'lock':
+            self.lock_action_combo.setCurrentIndex(1)
+        elif lock_action == 'unlock':
+            self.lock_action_combo.setCurrentIndex(2)
+        else:
+            self.lock_action_combo.setCurrentIndex(0) # Toggle
+            
+        # 3D Printer Settings
+        state_eid = self.config.get('printer_state_entity', '')
+        if state_eid:
+            self.printer_state_combo.setCurrentText(state_eid)
+        camera_eid = self.config.get('printer_camera_entity', '')
+        if camera_eid:
+            self.printer_camera_combo.setCurrentText(camera_eid)
+        nozzle_eid = self.config.get('printer_nozzle_entity', '')
+        if nozzle_eid:
+            self.printer_nozzle_combo.setCurrentText(nozzle_eid)
+        nozzle_target_eid = self.config.get('printer_nozzle_target_entity', '')
+        if nozzle_target_eid:
+            self.printer_nozzle_target_combo.setCurrentText(nozzle_target_eid)
+            
+        bed_eid = self.config.get('printer_bed_entity', '')
+        if bed_eid:
+            self.printer_bed_combo.setCurrentText(bed_eid)
+        bed_target_eid = self.config.get('printer_bed_target_entity', '')
+        if bed_target_eid:
+            self.printer_bed_target_combo.setCurrentText(bed_target_eid)
         
         self.select_color(self.config.get('color', '#4285F4'))
         
@@ -532,7 +710,11 @@ class ButtonEditWidget(QWidget):
         new_config['entity_id'] = entity_text.split(" ")[0] if entity_text else ""
         
         if new_config['type'] == 'climate':
-            new_config['advanced_mode'] = self.advanced_mode_check.isChecked()
+            # Clean up deprecated legacy key for backwards compatibility
+            new_config.pop('advanced_mode', None)
+            
+        if new_config['type'] == 'media_player':
+            new_config['show_album_art'] = self.show_album_art_check.isChecked()
             
         if new_config['type'] == 'switch':
              new_config['service'] = f"{new_config['entity_id'].split('.')[0]}.{self.service_combo.currentText()}"
@@ -548,6 +730,25 @@ class ButtonEditWidget(QWidget):
             # Sync camera_size to span for compatibility
             new_config['camera_size'] = new_config['span_x']
              
+        if new_config['type'] == 'automation':
+            new_config['action'] = 'trigger' if self.automation_action_combo.currentIndex() == 1 else 'toggle'
+
+        if new_config['type'] == 'lock':
+            idx = self.lock_action_combo.currentIndex()
+            if idx == 1: new_config['action'] = 'lock'
+            elif idx == 2: new_config['action'] = 'unlock'
+            else: new_config['action'] = 'toggle'
+            
+        if new_config['type'] == '3d_printer':
+            new_config['printer_state_entity'] = self.printer_state_combo.currentText().split(" ")[0]
+            new_config['printer_camera_entity'] = self.printer_camera_combo.currentText().split(" ")[0]
+            new_config['printer_nozzle_entity'] = self.printer_nozzle_combo.currentText().split(" ")[0]
+            new_config['printer_nozzle_target_entity'] = self.printer_nozzle_target_combo.currentText().split(" ")[0]
+            new_config['printer_bed_entity'] = self.printer_bed_combo.currentText().split(" ")[0]
+            new_config['printer_bed_target_entity'] = self.printer_bed_target_combo.currentText().split(" ")[0]
+            # Override standard entity_id with state entity for generic handling if needed
+            new_config['entity_id'] = new_config['printer_state_entity']
+        
         new_config['icon'] = self.icon_input.text().strip()
         new_config['color'] = self.selected_color
         
@@ -565,7 +766,7 @@ class ButtonEditWidget(QWidget):
         if not checked:
              self.record_btn.setChecked(False)
              if self.input_manager:
-                 self.input_manager.stop_listening()
+                 self.input_manager.restore_shortcut()
                  self.record_icon.setStyleSheet("background-color: white; border-radius: 6px;")
 
     def toggle_recording(self, checked):
@@ -581,7 +782,7 @@ class ButtonEditWidget(QWidget):
         else:
             # Record State (Circle)
             self.record_icon.setStyleSheet("background-color: white; border-radius: 6px;")
-            self.input_manager.stop_listening()
+            self.input_manager.restore_shortcut()
             # Restore if empty
             if self.shortcut_display.text() == "Press keys...":
                  sc = self.config.get('custom_shortcut', {}) if self.config else {}
@@ -592,7 +793,16 @@ class ButtonEditWidget(QWidget):
         if not self.record_btn.isChecked():
             return # Ignore if we aren't recording
             
-        self.record_btn.setChecked(False)
-        # Reset Icon
         self.record_icon.setStyleSheet("background-color: white; border-radius: 6px;")
         self.shortcut_display.setText(shortcut.get('value', ''))
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.save()
+            event.accept()
+        elif event.key() == Qt.Key.Key_Escape:
+            self.cancelled.emit()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+

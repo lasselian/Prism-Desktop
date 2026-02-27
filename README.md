@@ -5,12 +5,8 @@ Prism Desktop brings Home Assistant to your PC with a modern, lightweight deskto
 It features a sleek dashboard with smooth animations, build in notifications, intuitive drag-and-drop customization, and deep integration with Home Assistant entities.
 
 
-<img
-  width="418"
-  height="497"
-  alt="Prism Desktop – Home Assistant PC app dashboard"
-  src="https://github.com/user-attachments/assets/14e5d292-98be-4270-9ce3-9f9661499370"
-/>
+<img width="831" height="657" alt="image" src="https://github.com/user-attachments/assets/88a3da63-1007-403e-b4a4-910e51049e0c" />
+
 
 
 
@@ -18,30 +14,36 @@ It features a sleek dashboard with smooth animations, build in notifications, in
 
 - **System Tray Integration**: The app stays tucked away in your tray until you need it.
 - **PC notifications**: Send notifications to your PC via persistent_notification.create
+- **Resizeable dashboard**: adjust the size of your dashboard according to your needs.
 - **Morphing Controls**: Click and hold widgets to expand them into granular controls like dimmers or thermostats.
 - **Drag & Drop Customization**: Rearrange your dashboard grid simply by dragging icons around.
 - **Real-time Sync**: Uses Home Assistant's WebSocket API for instant state updates.
 - **Customizable Appearance**: Choose from different border effects (like Rainbow or Aurora) and customize button colors.
-- **Keyboard Shortcuts**: Global hotkeys for toggling the app and controlling individual buttons.
+- **Keyboard Shortcuts**: Create custom shortcuts for your button tiles
 
 ## Supported Entity Types
+- Automation
 - Camera
 - Climate
 - Curtain / Cover
 - Light / Switch
+- Media Controller
 - Scene
 - Script
 - Sensor
 - Weather
 
+## 3D printer tile
+- Camera
+- Nozzle Temperature
+- Nozzle Target Temperature
+- Bed Temperature
+- Bed Target Temperature
+- State
+
 ## Keyboard Shortcuts
 - **Open / Close App**: Use the shortcut defined in Settings under 'App toggle'.
-- **Toggle Buttons**: Use `Alt + 1-9` (or your preferred modifier key set in Settings).
 - **Custom Shortcuts**: Define custom shortcuts for any button via the Add/Edit menu.
-
-## How to Use (Lights)
-- **Click**: Toggle the light on/off.
-- **Hold (Long Press)**: Open the dimmer overlay for brightness control.
 
 ## Installation
 
@@ -78,7 +80,9 @@ If you want to modify the code or run it manually:
 
 Upon first launch, you will be asked for your Home Assistant URL and a Long-Lived Access Token. You can generate this token in your Home Assistant profile settings.
 
-<img width="420" height="729" alt="image" src="https://github.com/user-attachments/assets/b77c9c29-ea0e-4f42-be96-fafc37e41b8c" />
+<img width="538" height="822" alt="image" src="https://github.com/user-attachments/assets/a2f74ca1-e71d-49ae-88b6-8bf521293882" />
+
+
 
 
 

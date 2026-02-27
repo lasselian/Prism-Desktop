@@ -3,7 +3,7 @@ Input Manager for Prism Desktop
 Handles global keyboard shortcuts and mouse button triggers using pynput.
 """
 
-from PyQt6.QtCore import QObject, pyqtSignal, QThread
+from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer
 from pynput import keyboard, mouse
 import threading
 
@@ -24,6 +24,11 @@ class InputManager(QObject):
         self._is_recording = False
         self._pressed_keys = set()
         
+        # Health check timer - detect silently dead listener threads
+        self._health_timer = QTimer(self)
+        self._health_timer.setInterval(30000)  # Check every 30 seconds
+        self._health_timer.timeout.connect(self._check_listener_alive)
+        
         # Mouse button mapping - x1/x2 (side buttons) may not exist on Linux
         self._mouse_map = {
             mouse.Button.left: "Button.left",
@@ -42,6 +47,7 @@ class InputManager(QObject):
         self._current_shortcut = config
         
         if not config:
+            self._health_timer.stop()
             return
 
         print(f"InputManager: Setting shortcut to {config}")
@@ -50,6 +56,21 @@ class InputManager(QObject):
             self._start_keyboard_listener()
         elif config.get('type') == 'mouse':
             self._start_mouse_listener()
+        
+        # Start health monitoring
+        self._health_timer.start()
+    
+    def restore_shortcut(self):
+        """Restore the previously configured shortcut listener.
+        Call this after recording ends or is cancelled to bring back the hotkey."""
+        if self._current_shortcut:
+            print(f"InputManager: Restoring shortcut {self._current_shortcut}")
+            self.stop_listening()
+            if self._current_shortcut.get('type') == 'keyboard':
+                self._start_keyboard_listener()
+            elif self._current_shortcut.get('type') == 'mouse':
+                self._start_mouse_listener()
+            self._health_timer.start()
 
     def start_recording(self):
         """Start recording next input."""
@@ -72,6 +93,7 @@ class InputManager(QObject):
     def stop_listening(self):
         """Stop all listeners."""
         self._is_recording = False
+        self._health_timer.stop()
         if self._keyboard_listener:
             self._keyboard_listener.stop()
             self._keyboard_listener = None
@@ -115,6 +137,30 @@ class InputManager(QObject):
         """Emit trigger signal."""
         print("InputManager: Triggered!")
         self.triggered.emit()
+    
+    def _check_listener_alive(self):
+        """Periodic health check: restart listener if its thread died."""
+        if self._is_recording or not self._current_shortcut:
+            return
+        
+        shortcut_type = self._current_shortcut.get('type')
+        
+        if shortcut_type == 'keyboard' and self._keyboard_listener:
+            if not self._keyboard_listener.is_alive():
+                print("InputManager: Keyboard listener died, restarting...")
+                self._keyboard_listener = None
+                self._start_keyboard_listener()
+        elif shortcut_type == 'mouse' and self._mouse_listener:
+            if not self._mouse_listener.is_alive():
+                print("InputManager: Mouse listener died, restarting...")
+                self._mouse_listener = None
+                self._start_mouse_listener()
+        elif shortcut_type == 'keyboard' and not self._keyboard_listener:
+            print("InputManager: Keyboard listener missing, restarting...")
+            self._start_keyboard_listener()
+        elif shortcut_type == 'mouse' and not self._mouse_listener:
+            print("InputManager: Mouse listener missing, restarting...")
+            self._start_mouse_listener()
 
     # --- Recording Logic ---
 

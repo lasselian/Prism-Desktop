@@ -103,14 +103,54 @@ class Icons:
     PALETTE_OUTLINE = "\U000F0E0C"     # mdi-palette-outline (Corrected)
     SCENE_THEME = PALETTE_OUTLINE      # Default scene icon
     
+    # Automation
+    AUTOMATION = "\U000F0469"          # mdi-robot
+    
     # Empty/placeholder
     CIRCLE_OUTLINE = "\U000F0766"      # mdi-circle-outline
     CHECKBOX_BLANK_CIRCLE_OUTLINE = "\U000F0130"
     
+    # Forbidden / blocked
+    FORBIDDEN = "\U000F0119"           # mdi-block-helper
+    
+    # Weather
+    WEATHER_NIGHT = "\U000F0594"       # mdi-weather-night
+    WEATHER_CLOUDY = "\U000F0590"      # mdi-weather-cloudy
+    WEATHER_FOG = "\U000F0591"         # mdi-weather-fog
+    WEATHER_HAIL = "\U000F0592"        # mdi-weather-hail
+    WEATHER_LIGHTNING = "\U000F0593"   # mdi-weather-lightning
+    WEATHER_LIGHTNING_RAINY = "\U000F067E" # mdi-weather-lightning-rainy
+    # WEATHER_PARTLY_CLOUDY already defined above
+    WEATHER_POURING = "\U000F0598"     # mdi-weather-pouring
+    WEATHER_RAINY = "\U000F0596"       # mdi-weather-rainy
+    WEATHER_SNOWY = "\U000F0597"       # mdi-weather-snowy
+    WEATHER_SNOWY_RAINY = "\U000F067F" # mdi-weather-snowy-rainy
+    WEATHER_SUNNY = "\U000F0599"       # mdi-weather-sunny
+    WEATHER_WINDY = "\U000F059D"       # mdi-weather-windy
+    WEATHER_WINDY_VARIANT = "\U000F059E" # mdi-weather-windy-variant
+    ALERT_CIRCLE = "\U000F0028"        # mdi-alert-circle (for exceptional)
+    
     # Camera
     CAMERA = "\U000F0024"              # mdi-camera
     VIDEO = "\U000F0567"               # mdi-video
+    VIDEO_OFF = "\U000F0568"           # mdi-video-off
 
+    # Media
+    PLAY = "\U000F040A"                # mdi-play
+    PAUSE = "\U000F03E4"               # mdi-pause
+    STOP = "\U000F04DB"                # mdi-stop
+    NEXT = "\U000F04AD"                # mdi-skip-next
+    PREVIOUS = "\U000F04AE"            # mdi-skip-previous
+    PLAY_PAUSE = "\U000F040E"          # mdi-play-pause
+
+    # Security / Lock
+    LOCK = "\U000F033E"                # mdi-lock
+    LOCK_OPEN = "\U000F0341"           # mdi-lock-open
+
+    # 3D Printer
+    PRINTER_3D = "\U000F042B"          # mdi-printer-3d
+    PRINTER_3D_NOZZLE = "\U000F0E46"   # mdi-printer-3d-nozzle
+    RADIATOR = "\U000F0445"            # mdi-radiator (used for heat bed)
 
 # --- MDI Mapping Logic ---
 
@@ -208,6 +248,9 @@ def get_icon_for_type(entity_type: str, state: str = "off") -> str:
     
     elif entity_type == "script":
         return Icons.SCRIPT
+
+    elif entity_type == "automation":
+        return Icons.AUTOMATION
     
     elif entity_type == "curtain":
         return Icons.BLINDS_OPEN if state == "open" else Icons.BLINDS
@@ -227,6 +270,9 @@ def get_icon_for_type(entity_type: str, state: str = "off") -> str:
 
     elif entity_type == "fan":
         return Icons.FAN if state == "on" else Icons.FAN
+
+    elif entity_type == "lock":
+        return Icons.LOCK if state == "locked" else Icons.LOCK_OPEN
     
     # Default/empty
     return Icons.PLUS_CIRCLE

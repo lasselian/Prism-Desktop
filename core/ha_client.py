@@ -1,28 +1,30 @@
-import threading
+import asyncio
 import logging
-import requests
-from typing import Optional, Any
-
+import aiohttp
+from typing import Optional
 
 class HAClient:
-    """Synchronous client for Home Assistant REST API."""
+    """Asynchronous client for Home Assistant REST API."""
     
     def __init__(self, url: str = "", token: str = ""):
         self.url = url.rstrip('/')
         self.token = token
-        self._session: Optional[requests.Session] = None
-        self._lock = threading.Lock()
+        self._session: Optional[aiohttp.ClientSession] = None
         self.logger = logging.getLogger(__name__)
     
     def configure(self, url: str, token: str):
         """Update connection settings."""
-        with self._lock:
-            self.url = url.rstrip('/')
-            self.token = token
-            # Reset session on config change
-            if self._session:
-                self._session.close()
-                self._session = None
+        self.url = url.rstrip('/')
+        self.token = token
+        
+        # If there's an active session, close it so a new one is spawned with new token headers
+        if self._session and not self._session.closed:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._session.close())
+            except RuntimeError:
+                pass  # No running event loop
+        self._session = None
     
     @property
     def headers(self) -> dict:
@@ -32,174 +34,149 @@ class HAClient:
             "Content-Type": "application/json"
         }
     
-    def _get_session(self) -> requests.Session:
-        """Get or create requests session."""
-        with self._lock:
-            if self._session is None:
-                self._session = requests.Session()
-                # Headers are set on the session object, so we likely don't need to lock 'headers' property access
-                # but 'self.token' access inside 'headers' property is technically shared state, 
-                # though strings are immutable.
-                self._session.headers.update(self.headers)
-            return self._session
-    
-    def close(self):
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create aiohttp session."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(headers=self.headers)
+        return self._session
+
+    async def close(self):
         """Close the HTTP session."""
-        with self._lock:
-            if self._session:
-                self._session.close()
-                self._session = None
+        if self._session and not self._session.closed:
+            await self._session.close()
+        self._session = None
     
-    def test_connection(self) -> tuple[bool, str]:
+    async def test_connection(self) -> tuple[bool, str]:
         """
         Test connection to Home Assistant.
         Returns (success, message).
         """
-        # We need a local copy of url/token to be safe outside the lock for the checks
-        # or just hold the lock?
-        # Let's just use the properties, they are atomic enough for this check.
         if not self.url or not self.token:
             return False, "URL and token are required"
         
         try:
-            session = self._get_session()
-            # Session usage is thread-safe (requests)
-            response = session.get(
-                f"{self.url}/api/",
-                timeout=5
-            )
-            if response.status_code == 200:
-                return True, "Connected"
-            elif response.status_code == 401:
-                return False, "Invalid access token"
-            else:
-                return False, f"HTTP {response.status_code}"
-        except requests.RequestException as e:
+            # Create a temporary session or use the shared one? Use shared.
+            # But wait, if we are testing a NEW config, we shouldn't use the old keyed session.
+            # But usually test_connection is called with current self.url/token.
+            
+            # Use a one-off session for testing to avoid polluting the main pool if auth fails?
+            # Or just use the standard flow.
+            # Let's use a one-off for safety to ensure it tests exactly what's configured
+            # regardless of pooled state, although keep-alive is nice.
+            # Actually, standard flow is fine.
+            
+            async with aiohttp.ClientSession(headers=self.headers) as session:
+                async with session.get(f"{self.url}/api/", timeout=5) as response:
+                    if response.status == 200:
+                        return True, "Connected"
+                    elif response.status == 401:
+                        return False, "Invalid access token"
+                    else:
+                        return False, f"HTTP {response.status}"
+        except aiohttp.ClientError as e:
             self.logger.error(f"Connection test error: {e}")
             return False, f"Connection error: {e}"
+        except Exception as e:
+             return False, f"Error: {e}"
     
-    def get_entities(self) -> list[dict]:
-        """
-        Fetch all entities.
-        Returns list of state objects.
-        """
+    async def get_entities(self) -> list[dict]:
+        """Fetch all entities."""
         try:
-            session = self._get_session()
-            response = session.get(
-                f"{self.url}/api/states",
-                timeout=10
-            )
-            if response.status_code == 200:
-                return response.json()
-            return []
+            session = await self._get_session()
+            async with session.get(f"{self.url}/api/states", timeout=10) as response:
+                if response.status == 200:
+                    return await response.json()
+                return []
         except Exception as e:
             self.logger.error(f"Error fetching entities: {e}")
             return []
     
-    def get_state(self, entity_id: str) -> Optional[dict]:
-        """
-        Get state of a specific entity.
-        Returns entity state object or None.
-        """
+    async def get_state(self, entity_id: str) -> Optional[dict]:
+        """Get state of a specific entity."""
         try:
-            session = self._get_session()
-            response = session.get(
-                f"{self.url}/api/states/{entity_id}",
-                timeout=5
-            )
-            if response.status_code == 200:
-                return response.json()
-            return None
+            session = await self._get_session()
+            async with session.get(f"{self.url}/api/states/{entity_id}", timeout=5) as response:
+                if response.status == 200:
+                    return await response.json()
+                return None
         except Exception as e:
             self.logger.error(f"Error fetching state for {entity_id}: {e}")
             return None
+            
+    async def get_weather_forecast(self, entity_id: str, forecast_type="daily") -> list:
+        """Fetch weather forecast for a given entity."""
+        try:
+            session = await self._get_session()
+            payload = {"type": forecast_type, "entity_id": entity_id}
+            async with session.post(
+                f"{self.url}/api/services/weather/get_forecasts?return_response=true",
+                json=payload,
+                timeout=10
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    # Response format: {"service_response": {"weather.entity": {"forecast": [...]}}}
+                    service_resp = data.get("service_response", {})
+                    entity_data = service_resp.get(entity_id, {})
+                    return entity_data.get("forecast", [])
+                return []
+        except Exception as e:
+            self.logger.error(f"Error fetching weather forecast for {entity_id}: {e}")
+            return []
     
-    def call_service(
+    async def call_service(
         self,
         domain: str,
         service: str,
         entity_id: Optional[str] = None,
-        data: Optional[dict] = None
+        data: Optional[dict] = None,
+        timeout: int = 10
     ) -> bool:
-        """
-        Call a service.
-        Returns True if successful.
-        """
+        """Call a service."""
         try:
             payload = data or {}
             if entity_id:
                 payload["entity_id"] = entity_id
             
-            session = self._get_session()
-            response = session.post(
+            session = await self._get_session()
+            async with session.post(
                 f"{self.url}/api/services/{domain}/{service}",
                 json=payload,
-                timeout=5
-            )
-            return response.status_code == 200
+                timeout=timeout
+            ) as response:
+                return response.status == 200
         except Exception as e:
             self.logger.error(f"Service call failed for {domain}.{service}: {e}")
             return False
     
-    def get_services(self) -> dict:
-        """
-        Get available services from Home Assistant.
-        Returns dict of domain -> services.
-        """
+    async def get_camera_image(self, entity_id: str) -> Optional[bytes]:
+        """Fetch camera snapshot image."""
         try:
-            session = self._get_session()
-            response = session.get(
-                f"{self.url}/api/services",
-                timeout=10
-            )
-            if response.status_code == 200:
-                services = response.json()
-                # Convert to dict format
-                result = {}
-                for item in services:
-                    domain = item.get('domain', '')
-                    result[domain] = list(item.get('services', {}).keys())
-                return result
-            return {}
-        except Exception as e:
-            self.logger.error(f"Error fetching services: {e}")
-            return {}
-    
-    def get_camera_image(self, entity_id: str) -> Optional[bytes]:
-        """
-        Fetch camera snapshot image.
-        Returns raw image bytes or None on error.
-        """
-        try:
-            session = self._get_session()
-            response = session.get(
+            session = await self._get_session()
+            async with session.get(
                 f"{self.url}/api/camera_proxy/{entity_id}",
                 timeout=10
-            )
-            if response.status_code == 200:
-                return response.content
-            return None
+            ) as response:
+                if response.status == 200:
+                    return await response.read()
+                return None
         except Exception as e:
             self.logger.error(f"Error fetching camera image for {entity_id}: {e}")
             return None
-    
-    def stream_camera(self, entity_id: str) -> Optional[Any]:
-        """
-        Start a camera stream (MJPEG).
-        Returns a requests.Response object (stream=True) or None.
-        Caller must close the response.
-        """
-        try:
-            session = self._get_session()
-            # Use camera_proxy_stream for MJPEG stream
-            response = session.get(
-                f"{self.url}/api/camera_proxy_stream/{entity_id}",
-                stream=True,
-                timeout=10 
-            )
-            if response.status_code == 200:
-                return response
+            
+    async def get_media_image(self, image_path: str) -> Optional[bytes]:
+        """Fetch media player album art."""
+        if not image_path:
             return None
+        try:
+            # entity_picture is a relative URL like /api/media_player_proxy/...
+            url = f"{self.url}{image_path}" if image_path.startswith('/') else image_path
+            
+            session = await self._get_session()
+            async with session.get(url, timeout=10) as response:
+                if response.status == 200:
+                    return await response.read()
+                return None
         except Exception as e:
-            self.logger.error(f"Stream start error: {e}")
+            self.logger.error(f"Error fetching media image: {e}")
             return None

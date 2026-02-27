@@ -45,14 +45,6 @@ class HAWebSocket(QObject):
         """Add entity to subscription list."""
         self._subscribed_entities.add(entity_id)
     
-    def unsubscribe_entity(self, entity_id: str):
-        """Remove entity from subscription list."""
-        self._subscribed_entities.discard(entity_id)
-    
-    def clear_subscriptions(self):
-        """Clear all entity subscriptions."""
-        self._subscribed_entities.clear()
-    
     def _next_id(self) -> int:
         """Get next message ID."""
         self._message_id += 1
@@ -61,6 +53,7 @@ class HAWebSocket(QObject):
     def request_stop(self):
         """Thread-safe stop request."""
         self._running = False
+        self._should_stop_loop = True  # Signal the reconnect loop to stop
     
     async def _send(self, data: dict):
         """Send message to WebSocket."""
@@ -121,6 +114,9 @@ class HAWebSocket(QObject):
             # Start message loop
             await self._message_loop()
             
+        except asyncio.CancelledError:
+            self._running = False
+            raise
         except Exception as e:
             if self._running:  # Only emit error if not stopping
                 self.error.emit(str(e))
@@ -229,90 +225,42 @@ class HAWebSocket(QObject):
             # Object was deleted
             pass
 
-
-class WebSocketThread(QThread):
-    """Thread for running WebSocket client."""
-    
-    def __init__(self, ws_client: HAWebSocket):
-        super().__init__()
-        self.ws_client = ws_client
-        self.logger = logging.getLogger(__name__)
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._stop_requested = False
-    
-    def run(self):
-        """Run the WebSocket client with auto-reconnection."""
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        
+    async def run_reconnect_loop(self):
+        """Run the WebSocket client with auto-reconnection in the main loop."""
+        self._should_stop_loop = False
         backoff = 1
         max_backoff = 30
         
-        try:
-            while not self._stop_requested:
-                try:
-                    # Reset backoff on successful run (if it stays connected for a bit)
-                    start_time = time.time()
+        while not self._should_stop_loop:
+            try:
+                # Reset backoff on successful run
+                start_time = time.time()
+                
+                # Run client connection
+                await self.connect()
+                
+                # If we are here, connect() returned
+                if self._should_stop_loop:
+                    break
                     
-                    # Run client connection
-                    self._loop.run_until_complete(self.ws_client.connect())
-                    
-                    # If we are here, connect() returned (disconnect or error)
-                    if self._stop_requested:
+                if time.time() - start_time > 10:
+                    backoff = 1  # Reset backoff if we were connected for >10s
+                
+                self.logger.warning(f"WebSocket disconnected. Reconnecting in {backoff}s...")
+                self.error.emit(f"Disconnected. Reconnecting in {backoff}s...")
+                
+                # Wait for backoff
+                for _ in range(backoff * 10):
+                    if self._should_stop_loop:
                         break
-                        
-                    # Check if connection was short-lived (immediate failure)
-                    if time.time() - start_time > 10:
-                        backoff = 1  # Reset backoff if we were connected for >10s
-                    
-                    self.logger.warning(f"WebSocket disconnected. Reconnecting in {backoff}s...")
-                    self.ws_client.error.emit(f"Disconnected. Reconnecting in {backoff}s...")
-                    
-                    # Wait for backoff or stop
-                    # We can't use time.sleep or QThread.sleep effectively with stop signal
-                    # So we use a small loop
-                    for _ in range(backoff * 10):
-                        if self._stop_requested: break
-                        self.msleep(100)
-                        
-                    # Exponential backoff
-                    backoff = min(backoff * 2, max_backoff)
-                    
-                except Exception as e:
-                    self.logger.error(f"WebSocket Thread Error: {e}")
-                    if self._stop_requested: break
-                    self.msleep(1000)
-                    
-        finally:
-            try:
-                # Clean up pending tasks
-                pending = asyncio.all_tasks(self._loop)
-                for task in pending:
-                    task.cancel()
-                if pending:
-                    self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                self._loop.close()
-            except:
-                pass
-    
-    def stop(self):
-        """Stop the WebSocket thread gracefully (non-blocking)."""
-        self.logger.info("WebSocketThread.stop() called")
-        self._stop_requested = True
-        
-        # Request websocket to stop
-        self.ws_client.request_stop()
-        
-        # Try to disconnect via event loop if it's running
-        if self._loop and self._loop.is_running():
-            try:
-                # Schedule disconnect but don't wait synchronously
-                asyncio.run_coroutine_threadsafe(
-                    self.ws_client.disconnect(),
-                    self._loop
-                )
-            except:
-                pass
-        
-        # Signal thread to quit event loop
-        self.quit()
+                    await asyncio.sleep(0.1)
+                
+                backoff = min(backoff * 2, max_backoff)
+                
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                self.logger.error(f"WebSocket Loop Error: {e}")
+                if self._should_stop_loop:
+                    break
+                await asyncio.sleep(1)

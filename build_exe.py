@@ -6,11 +6,6 @@ from pathlib import Path
 def build():
     """Build the Prism Desktop executable."""
     print("Building Prism Desktop...")
-    
-    # Check for PyInstaller
-    # if not shutil.which("pyinstaller"):
-    #     print("Error: PyInstaller not found. Please install it with: pip install pyinstaller")
-    #     return
 
     # Define paths
     base_dir = Path(__file__).parent

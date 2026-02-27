@@ -20,15 +20,27 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QColor, QFont, QDrag, QPixmap, QPainter, QCursor,
     QPen, QBrush, QLinearGradient, QConicalGradient, QDesktopServices,
-    QIcon
-
+    QIcon, QPainterPath
 )
 from ui.icons import get_icon, get_mdi_font
 
 # Cross-platform system font
 from core.utils import SYSTEM_FONT
 from ui.widgets.dashboard_button import DashboardButton, MIME_TYPE
-from ui.widgets.overlays import DimmerOverlay, ClimateOverlay
+from ui.widgets.footer_button import FooterButton
+from ui.constants import (
+    WINDOW_WIDTH, DEFAULT_COLS,
+    BUTTON_HEIGHT, BUTTON_WIDTH, BUTTON_SPACING, 
+    GRID_MARGIN_LEFT, GRID_MARGIN_RIGHT, GRID_MARGIN_TOP, GRID_MARGIN_BOTTOM,
+    FOOTER_HEIGHT, FOOTER_MARGIN_BOTTOM,
+    ANIM_DURATION_ENTRANCE, ANIM_DURATION_HEIGHT, ANIM_DURATION_WIDTH, ANIM_DURATION_BORDER,
+    ROOT_MARGIN, RESIZE_MARGIN, calculate_width, calculate_footer_btn_width
+)
+from ui.managers.overlay_manager import OverlayManager
+
+from ui.grid_layout_engine import GridLayoutEngine
+from ui.settings_widget import SettingsWidget
+from ui.button_edit_widget import ButtonEditWidget
 
 
 class FrozenScrollArea(QScrollArea):
@@ -36,89 +48,105 @@ class FrozenScrollArea(QScrollArea):
     def wheelEvent(self, event):
         event.accept()
 
+class VirtualButton:
+    """Helper for layout engine to track out-of-bounds buttons without consuming a widget."""
+    def __init__(self, config):
+        self.config = config
+        self.span_x = config.get('span_x', 1)
+        self.span_y = config.get('span_y', 1)
+
 class Dashboard(QWidget):
     """Main dashboard popup widget with dynamic grid."""
     
     button_clicked = pyqtSignal(dict)  # Button config
     add_button_clicked = pyqtSignal(int)  # Slot index
     buttons_reordered = pyqtSignal(int, int) # (source, target)
-    edit_button_requested = pyqtSignal(int) 
+    edit_button_requested = pyqtSignal(int)
+    edit_button_saved = pyqtSignal(int, dict) # NEW: Signal for save completion
     save_config_requested = pyqtSignal() # New signal to request save from parent 
     duplicate_button_requested = pyqtSignal(int)
     clear_button_requested = pyqtSignal(int)
     rows_changed = pyqtSignal()  # Emitted after row count changes and UI rebuilds
-    # Signal for when settings button is clicked
+    cols_changed = pyqtSignal()  # Emitted after column count changes and UI rebuilds
     settings_clicked = pyqtSignal()
+    volume_scroll_requested = pyqtSignal(str, float)  # entity_id, new_volume (for scroll wheel)
+    media_command_requested = pyqtSignal(int, str)    # slot, command
+    weather_forecast_requested = pyqtSignal(int, QRect, dict) # slot, geometry, config
     
-    def __init__(self, config: dict, theme_manager=None, input_manager=None, version: str = "Unknown", rows: int = 2, parent=None):
+    def __init__(self, config: dict, theme_manager=None, input_manager=None, version: str = "Unknown", rows: int = 2, cols: int = DEFAULT_COLS, parent=None):
         super().__init__(parent)
         self.config = config
         self.theme_manager = theme_manager
         self.input_manager = input_manager
         self.version = version
         self._rows = rows
+        self._cols = cols
         self.buttons: list[DashboardButton] = []
+        self._button_pool: list[DashboardButton] = []  # Pool for recycled buttons
         self._button_configs: list[dict] = []
         self._entity_states: dict = {} # Map entity_id -> full state dict
         
         # Entrance Animation
         self._anim_progress = 0.0
         self.anim = QPropertyAnimation(self, b"anim_progress")
-        self.anim.setDuration(1500)
+        self.anim.setDuration(ANIM_DURATION_ENTRANCE)
         self.anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
         self.anim.finished.connect(self._on_anim_finished)
         
         # Border Animation (Decoupled from entrance)
         self._border_progress = 0.0
         self.border_anim = QPropertyAnimation(self, b"glow_progress")
-        self.border_anim.setDuration(1500) # Slower, elegant spin
+        self.border_anim.setDuration(ANIM_DURATION_BORDER) # Slower, elegant spin
         self.border_anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
         
-        self.dimmer_overlay = DimmerOverlay(self)
-        self.dimmer_overlay.value_changed.connect(self.on_dimmer_value_changed)
-        self.dimmer_overlay.finished.connect(self.on_dimmer_finished)
-        self.dimmer_overlay.morph_changed.connect(self.on_morph_changed)
-        
-        # Climate overlay
-        self.climate_overlay = ClimateOverlay(self)
-        self.climate_overlay.value_changed.connect(self.on_climate_value_changed)
-        self.climate_overlay.mode_changed.connect(self.on_climate_mode_changed)
-        self.climate_overlay.fan_changed.connect(self.on_climate_fan_changed)
-        self.climate_overlay.finished.connect(self.on_climate_finished)
-        self.climate_overlay.morph_changed.connect(self.on_climate_morph_changed)
+        # Overlay Manager
+        self.overlay_manager = OverlayManager(self, self.theme_manager)
+        self.overlay_manager.update_buttons(self.buttons)
+        self.overlay_manager.update_states(self._entity_states)
+        self.overlay_manager.service_request.connect(self.button_clicked.emit)
         
         # Throttling
-        self._last_dimmer_call = 0
-        self._pending_dimmer_val = None
-        self._active_dimmer_entity = None
-        self.dimmer_timer = QTimer(self)
-        self.dimmer_timer.setInterval(100) # 100ms throttle
-        self.dimmer_timer.timeout.connect(self.process_pending_dimmer)
+
         
-        # Climate throttling
-        self._last_climate_call = 0
-        self._pending_climate_val = None
-        self._active_climate_entity = None
-        self.climate_timer = QTimer(self)
-        self.climate_timer.setInterval(500)  # 500ms throttle for climate
-        self.climate_timer.timeout.connect(self.process_pending_climate)
         
-        self._border_effect = 'Rainbow' # Default border effect
+        # Load theme settings
+        app_config = self.config.get('appearance', {})
+        self._border_effect = app_config.get('border_effect', 'Rainbow')
+        self._show_dimming = app_config.get('show_dimming', False)
+        self._glass_ui = app_config.get('glass_ui', False)
+        self._button_style = app_config.get('button_style', 'Gradient')
+        
+        # Propagate border effect to overlay manager
+        self.overlay_manager.set_border_effect(self._border_effect)
         
         self.setup_ui()
         
         # View switching (Grid vs Settings)
         self._current_view = 'grid'  # 'grid' or 'settings'
         self._grid_height = None  # Will be set after first show
-        self._fixed_width = 428  # Fixed width to maintain
+        self._fixed_width = calculate_width(self._cols)  # Dynamic width based on cols
         
+        # Window Resize Logic
+        self.setMouseTracking(True) # Enable hover events for cursor change
+        self._is_resizing_window = False
+        self._resize_mode = None # 'top', 'left', 'top-left'
+        self._resize_start_pos = None # Global pos
+        self._resize_start_geo = None # (x, y, w, h)
+        self._resize_start_rows = rows
+        self._resize_start_cols = cols
+        
+        self._ignore_focus_loss = False  # Guard for resize release outside window
+        
+        # Drag & Drop
+        self.setAcceptDrops(True)
         
         # Height animation (Custom Timer Loop for smooth sync)
         self._anim_start_height = 0
         self._anim_target_height = 0
         self._anim_start_time = 0
         self._anim_duration = 0.25
-        self._anchor_bottom_y = 0
+
+        self._height_anim_anchor_bottom = None # Anchor Y for height resize
         
         self._animation_timer = QTimer(self)
         self._animation_timer.setInterval(16) # ~60 FPS
@@ -133,22 +161,157 @@ class Dashboard(QWidget):
         # Window Height Animation
         self._anim_height = 0
         self.height_anim = QPropertyAnimation(self, b"anim_height")
-        self.height_anim.setDuration(400)
+        self.height_anim.setDuration(ANIM_DURATION_HEIGHT)
         self.height_anim.setEasingCurve(QEasingCurve.Type.OutBack) # Slight bounce
+        # Serialize: Check for pending width changes after height finishes
+        self._pending_resize_cols = None
+        self._pending_rows_update = None # Store pending rows change (for phased animation)
+        self.height_anim.finished.connect(self._on_height_anim_finished)
+        
+        # Window Width Animation
+        self._anim_width = 0
+        self.width_anim = QPropertyAnimation(self, b"anim_width")
+        self.width_anim.setDuration(ANIM_DURATION_WIDTH)
+        self.width_anim.setEasingCurve(QEasingCurve.Type.OutBack)
+        self.width_anim.finished.connect(self._on_width_anim_finished)
+            
+    def dragEnterEvent(self, event):
+        """Accept dragging buttons."""
+        if event.mimeData().hasFormat(MIME_TYPE):
+            event.acceptProposedAction()
+    
+    def dragMoveEvent(self, event):
+        """Track drag movement."""
+        if not event.mimeData().hasFormat(MIME_TYPE):
+             return
+             
+        # Decode source slot to get span
+        data = event.mimeData().data(MIME_TYPE)
+        stream = QDataStream(data, QIODevice.OpenModeFlag.ReadOnly)
+        source_slot = stream.readInt32()
+        
+        source_btn = next((b for b in self.buttons if b.slot == source_slot), None)
+        if not source_btn:
+            event.ignore()
+            return
+
+        # Decode source slot to get span
+        data = event.mimeData().data(MIME_TYPE)
+        stream = QDataStream(data, QIODevice.OpenModeFlag.ReadOnly)
+        source_slot = stream.readInt32()
+        
+        source_btn = next((b for b in self.buttons if b.slot == source_slot), None)
+        if not source_btn:
+            event.ignore()
+            return
+
+        # Check target
+        drop_pos = event.position().toPoint()
+        target_slot = -1
+        
+        # 1. Check if over a valid button (occupied or empty)
+        for btn in self.buttons:
+             if not btn.isVisible(): continue
+             if btn.geometry().contains(drop_pos):
+                 target_slot = btn.slot
+                 target_btn = btn
+                 break
+        
+        # 2. If not over a button, check if within grid area (e.g. gap) and map to closest slot?
+        # For now, require being over a slot.
+        
+        if target_slot != -1:
+             # Check bounds: Does source button fit at target position?
+             # Target slot -> (row, col)
+             target_row = target_slot // self._cols
+             target_col = target_slot % self._cols
+             
+             if target_row + source_btn.span_y > self._rows:
+                 event.ignore()
+                 return
+             if target_col + source_btn.span_x > self._cols:
+                 event.ignore()
+                 return
+
+             # Block if target is forbidden
+             target_btn = next((b for b in self.buttons if b.slot == target_slot), None)
+             if target_btn and target_btn.config and target_btn.config.get('type') == 'forbidden':
+                  event.ignore()
+                  return
+
+        event.acceptProposedAction()
+            
+    def dropEvent(self, event):
+        """Handle button drop."""
+        if not event.mimeData().hasFormat(MIME_TYPE):
+            return
+            
+        source_slot = event.source().slot
+        
+        # Determine target slot based on drop position
+        drop_pos = event.position().toPoint()
+        
+        # Check if dropped on another button
+        target_slot = -1
+        
+        # Find button under mouse
+        for btn in self.buttons:
+            if not btn.isVisible(): continue
+            if btn.geometry().contains(drop_pos):
+                target_slot = btn.slot
+                break
+        
+        if target_slot != -1 and target_slot != source_slot:
+            # 1. Bounds Check
+            # Get source button to check dimensions
+            source_btn = next((b for b in self.buttons if b.slot == source_slot), None)
+            
+            if source_btn:
+                target_row = target_slot // self._cols
+                target_col = target_slot % self._cols
+                
+                if target_row + source_btn.span_y > self._rows:
+                    return
+                if target_col + source_btn.span_x > self._cols:
+                    return
+
+            # 2. Forbidden Check
+            target_btn = next((b for b in self.buttons if b.slot == target_slot), None)
+            if target_btn and target_btn.config and target_btn.config.get('type') == 'forbidden':
+                return
+                
+            self.on_button_dropped(source_slot, target_slot)
+            event.acceptProposedAction()
             
     def get_anim_height(self):
         return self.height()
         
     def set_anim_height(self, h):
         h = int(h)
-        # Anchor to bottom if we have captured an anchor point
-        if hasattr(self, '_resize_anchor_y'):
-             new_y = self._resize_anchor_y - h
-             self.setGeometry(self.x(), new_y, self.width(), h)
-        else:
-             self.setFixedSize(self.width(), h)
+        # Anchor to BOTTOM (Grow Up)
+        if self._height_anim_anchor_bottom is None:
+             self._height_anim_anchor_bottom = self.y() + self.height()
+             
+        # Calculate new Y so bottom stays fixed
+        new_y = self._height_anim_anchor_bottom - h
+        self.setGeometry(self.x(), new_y, self.width(), h)
         
     anim_height = pyqtProperty(float, get_anim_height, set_anim_height)
+
+    def get_anim_width(self):
+        return self.width()
+    
+    def set_anim_width(self, w):
+        w = int(w)
+        # Anchor to RIGHT (Grow Left)
+        # new_x = anchor_right - new_width
+        anchor_right = getattr(self, '_width_anim_anchor_right', self.x() + self.width())
+        new_x = anchor_right - w
+        
+        # Use setGeometry for atomic move+resize (smoother)
+        self.setGeometry(new_x, self.y(), w, self.height())
+    
+    anim_width = pyqtProperty(float, get_anim_width, set_anim_width)
 
     def set_rows(self, rows: int):
         """Set number of rows and rebuild grid."""
@@ -164,28 +327,75 @@ class Dashboard(QWidget):
     def handle_button_resize(self, slot_idx, span_x, span_y):
         """Handle resize request from a button."""
         
-        # Validate against grid boundaries
-        row = slot_idx // 4
-        col = slot_idx % 4
+        # Find the button and its config by runtime slot
+        source_btn = next((b for b in self.buttons if b.slot == slot_idx), None)
+        if not source_btn or not source_btn.config:
+            return
+        
+        # Get (row, col) from config
+        row = source_btn.config.get('row', 0)
+        col = source_btn.config.get('col', 0)
         
         # Clamp span to available space
-        max_span_x = 4 - col
+        max_span_x = self._cols - col
+        
+        # Check for dynamic row expansion (only for 3D Printers)
+        if source_btn.config.get('type') == '3d_printer':
+            required_rows = row + span_y
+            if required_rows > self._rows and span_y <= 3 and required_rows <= 4:
+                # Dynamically expand rows immediately
+                self._rows = required_rows
+                
+                # Fill button pool to match new grid size
+                target_slots = self._rows * self._cols
+                while len(self.buttons) < target_slots:
+                    b = self._get_button_from_pool(len(self.buttons))
+                    self.buttons.append(b)
+                
+                # Update config so the new row count persists across restarts
+                if 'appearance' not in self.config: self.config['appearance'] = {}
+                self.config['appearance']['rows'] = self._rows
+                
         max_span_y = self._rows - row
         
         valid_span_x = min(span_x, max_span_x)
         valid_span_y = min(span_y, max_span_y)
         
-        # Find config by slot field, not by array index
-        config = next((c for c in self._button_configs if c.get('slot', -1) == slot_idx), None)
-        if config:
-            config['span_x'] = valid_span_x
-            config['span_y'] = valid_span_y
+        # Auto-Relocation: Check if expanding would overlap other configured buttons
+        if not hasattr(self, 'layout_engine'):
+            self.layout_engine = GridLayoutEngine(cols=self._cols)
+        
+        relocations = self.layout_engine.find_relocations(
+            source_btn, valid_span_x, valid_span_y, self.buttons, self._rows
+        )
+        
+        if relocations is None:
+            # No room to relocate displaced buttons — block the resize
+            return
+        
+        # Apply relocations: update displaced buttons' config positions
+        for btn, new_r, new_c in relocations:
+            btn.config['row'] = new_r
+            btn.config['col'] = new_c
+            # Also update the master config list so persistence works
+            for cfg in self._button_configs:
+                if cfg.get('entity_id') == btn.config.get('entity_id'):
+                    cfg['row'] = new_r
+                    cfg['col'] = new_c
+                    break
+        
+        source_btn.config['span_x'] = valid_span_x
+        source_btn.config['span_y'] = valid_span_y
+        
+        # Also update master config list for the resized button
+        for cfg in self._button_configs:
+            if cfg.get('entity_id') == source_btn.config.get('entity_id'):
+                cfg['span_x'] = valid_span_x
+                cfg['span_y'] = valid_span_y
+                break
         
         # Update button instance size (but DON'T rebuild grid during drag)
-        for btn in self.buttons:
-            if btn.slot == slot_idx:
-                btn.set_spans(valid_span_x, valid_span_y)
-                break
+        source_btn.set_spans(valid_span_x, valid_span_y)
 
         # Live preview: rebuild grid without disrupting mouse events
         self.rebuild_grid(preview_mode=True)
@@ -196,16 +406,13 @@ class Dashboard(QWidget):
         self.rebuild_grid(preview_mode=False)
         self.save_config_requested.emit()
 
-    def rebuild_grid(self, preview_mode=False):
-        """Rebuild the grid using Auto-Flow algorithm."""
+    def rebuild_grid(self, preview_mode=False, update_height=True):
+        """Rebuild the grid using (row, col) based layout."""
         # 0. Lazy Import / Init Engine
         if not hasattr(self, 'layout_engine'):
-            from ui.grid_layout_engine import GridLayoutEngine
-            self.layout_engine = GridLayoutEngine(cols=4)
+            self.layout_engine = GridLayoutEngine(cols=self._cols)
 
         # 1. Clear Grid
-        # In preview mode, skip hiding to preserve mouse capture if needed, 
-        # but usually we need to detach from grid anyway.
         if not preview_mode:
             for btn in self.buttons:
                 btn.hide()
@@ -214,127 +421,409 @@ class Dashboard(QWidget):
             self.grid.takeAt(0)
             
         # 2. Calculate Layout
-        # We pass self.buttons directly. The engine expects objects with .config, .slot, .span_x/y
-        placements = self.layout_engine.calculate_layout(self.buttons, self._rows)
+        # Include virtual (out-of-bounds) buttons so forbidden cells are marked
+        all_buttons = list(self.buttons)
+        if hasattr(self, '_virtual_buttons') and self._virtual_buttons:
+            all_buttons.extend(self._virtual_buttons)
+            
+        placements = self.layout_engine.calculate_layout(all_buttons, self._rows)
         
         max_row = 0
         
         # 3. Apply Placements
         for btn, r, c, span_y, span_x in placements:
+            # RESET transient states for empty buttons (fixes stuck "forbidden" icons)
+            if not (btn.config and btn.config.get('entity_id')):
+                 btn.config = {}
+                 btn.update_content()
+                 btn.update_style()
+
+            # Add to grid FIRST to ensure parentage
+            self.grid.addWidget(btn, r, c, span_y, span_x)
+            
+            # Then show
             btn.setVisible(True)
             
             # Reset resize styling if not resizing
             if not getattr(btn, '_is_resizing', False):
-                btn.resize_handle_opacity = 0.0 # Use property directly
+                btn.resize_handle_opacity = 0.0
                 if hasattr(btn, 'resize_anim'):
                     btn.resize_anim.stop()
             
-            # Add to grid
-            self.grid.addWidget(btn, r, c, span_y, span_x)
-            
-            # Update button state
-            new_slot = r * 4 + c
+            # Compute runtime slot for signal/overlay compat
+            new_slot = r * self._cols + c
             btn.slot = new_slot
             
-            # Update Config (only if not previewing drag)
+            # Update Config with (row, col) — NOT slot
             if not preview_mode and btn.config:
-                btn.config['slot'] = new_slot
+                btn.config['row'] = r
+                btn.config['col'] = c
                 
             max_row = max(max_row, r + span_y)
             
-        # 4. Hide unused buttons (shouldn't be any if engine logic is correct and we passed all buttons)
-        # The engine filters out buttons that don't fit? 
-        # Actually our engine includes empty buttons to fill holes.
-        # Any button NOT in placements should be hidden.
+        # 3b. Mark forbidden cells: buttons that are in cells blocked by out-of-bounds configured buttons
+        forbidden_cells = self.layout_engine.get_forbidden_cells()
+        if forbidden_cells:
+            for btn, r, c, span_y, span_x in placements:
+                if (r, c) in forbidden_cells and not (btn.config and btn.config.get('entity_id')):
+                    # This is an empty/add button sitting in a forbidden cell
+                    btn.config = {'type': 'forbidden'}
+                    btn.update_content()
+                    btn.update_style()
+        
+        # 3c. Fix z-order: raise configured buttons above empty/add buttons
+        # Without this, empty buttons in adjacent cells can visually cover
+        # multi-span configured buttons after a resize.
+        for btn, r, c, span_y, span_x in placements:
+            if btn.config and btn.config.get('entity_id'):
+                btn.raise_()
+            
+        # 4. Hide buttons not placed (outside visible grid or conflicting)
         placed_buttons = set(p[0] for p in placements)
         for btn in self.buttons:
             if btn not in placed_buttons:
                 btn.setVisible(False)
         
-        # 5. Update Height
-        grid_h = (self._rows * 80) + ((self._rows - 1) * 8)
-        extras = 78
-        new_height = grid_h + extras
-        
-        start_h = self.height()
-        if start_h != new_height and self._current_view == 'grid':
-            if preview_mode:
-                self.setFixedSize(self.width(), new_height)
-                if hasattr(self, '_resize_anchor_y'):
-                    new_y = self._resize_anchor_y - new_height
-                    self.move(self.x(), new_y)
-            else:
-                self._resize_anchor_y = self.y() + self.height()
-                self.height_anim.stop()
-                self.height_anim.setStartValue(float(start_h))
-                self.height_anim.setEndValue(float(new_height))
-                self.height_anim.start()
+        # 5. Update Height (Only if requested and not previewing)
+        if update_height:
+            grid_h = (self._rows * BUTTON_HEIGHT) + ((self._rows - 1) * BUTTON_SPACING)
+            extras = GRID_MARGIN_TOP + GRID_MARGIN_BOTTOM + FOOTER_HEIGHT + FOOTER_MARGIN_BOTTOM + 20
+            new_height = grid_h + extras
+            
+            start_h = self.height()
+            if start_h != new_height and self._current_view == 'grid':
+                if preview_mode:
+                    self.setFixedSize(self.width(), new_height)
+                    if hasattr(self, '_resize_anchor_y'):
+                        new_y = self._resize_anchor_y - new_height
+                        self.move(self.x(), new_y)
+                else:
+                    # Avoid restarting animation if already running towards target
+                    if self.height_anim.state() == QPropertyAnimation.State.Running and \
+                       abs(self.height_anim.endValue() - new_height) < 1.0:
+                        return
 
-    def get_first_empty_slot(self, span_x: int = 1, span_y: int = 1) -> int:
-        """Find the first visual slot index that is completely empty and fits the span."""
+                    self._resize_anchor_y = self.y() + self.height()
+                    self.height_anim.stop()
+                    self.height_anim.setStartValue(float(start_h))
+                    self.height_anim.setEndValue(float(new_height))
+                    self.height_anim.start()
+
+    def get_first_empty_slot(self, span_x: int = 1, span_y: int = 1) -> tuple:
+        """Find the first visible (row, col) that is completely empty and fits the span."""
         if not hasattr(self, 'layout_engine'):
-            from ui.grid_layout_engine import GridLayoutEngine
-            self.layout_engine = GridLayoutEngine(cols=4)
+            self.layout_engine = GridLayoutEngine(cols=self._cols)
             
         return self.layout_engine.find_first_empty_slot(self.buttons, self._rows, span_x, span_y)
             
     def _do_set_rows(self, rows: int):
-        """Update grid rows dynamically."""
-        self._rows = rows
+        """Update grid rows dynamically (Animate First, Rebuild Later)."""
         
-        # Update button count to match N*4 slots (classic logic)
-        # This keeps the "Add" buttons available filling the space.
+        # Calculate target height for the NEW row count
+        # grid_h calculation moved here (Phase 1)
+        grid_h = (rows * BUTTON_HEIGHT) + ((rows - 1) * BUTTON_SPACING)
+        extras = GRID_MARGIN_TOP + GRID_MARGIN_BOTTOM + FOOTER_HEIGHT + FOOTER_MARGIN_BOTTOM + (2 * ROOT_MARGIN)
+        target_h = grid_h + extras
+        
+        # Store pending update
+        self._pending_rows_update = rows
+        
+        # Start Animation (Phase 1)
+        if self.height_anim.state() == QPropertyAnimation.State.Running:
+             self.height_anim.stop()
+             
+        # Reset anchor to ensure we capture current position correctly
+        self._height_anim_anchor_bottom = None
+             
+        # Unlock size constraints for animation
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
+        
+        self._anim_target_height = target_h
+        self.height_anim.setStartValue(self.height())
+        self.height_anim.setEndValue(target_h)
+        self.height_anim.start()
+
+    def _on_height_anim_finished(self):
+        """Called when height animation finishes. Apply grid changes (Phase 2)."""
+        # Apply pending row update if any
+        if self._pending_rows_update is not None:
+            new_rows = self._pending_rows_update
+            self._rows = new_rows
+            
+            # Ensure button pool matches grid size
+            target_slots = new_rows * self._cols
+            current_slots = len(self.buttons)
+            
+            new_buttons = []
+            
+            if target_slots > current_slots:
+                for i in range(current_slots, target_slots):
+                    button = self._get_button_from_pool(i)
+                    self.buttons.append(button)
+                    new_buttons.append(button)
+                        
+            elif target_slots < current_slots:
+                for i in range(current_slots - 1, target_slots - 1, -1):
+                    btn = self.buttons.pop()
+                    self._recycle_button(btn)
+            
+            # Re-apply all configs using (row, col) logic
+            # set_buttons calls rebuild_grid, so we must be careful.
+            # But set_buttons is general purpose. 
+            # Ideally we call set_buttons with a flag or just do it manually here.
+            # set_buttons calls rebuild_grid() -> which might restart animation.
+            
+            # Let's modify set_buttons to NOT rebuild if we do it here? 
+            # Or better: call set_buttons which calls rebuild_grid. 
+            # We need rebuild_grid to NOT start animation if called from here.
+            
+            # Actually set_buttons() calls rebuild_grid(). 
+            # If we call set_buttons below, we need to suppress its height animation.
+            # But set_buttons doesn't take args.
+            
+            # FIX: We can set a temporary flag or just call the logic directly.
+            
+            # Applying config
+            self._button_configs = self._button_configs # No change to config list
+            
+            # We need to refresh the button assignments (like set_buttons does)
+            # but without triggering another height animation.
+            
+            # Reusing set_buttons logic but manually to control rebuild_grid
+            self.set_buttons(self._button_configs, self.config.get('appearance', {}), update_height=False)
+            
+            self.update_style()
+            
+            # FIX: Ensure ALL buttons are fully visible after set_buttons
+            for button in self.buttons:
+                button.set_faded(1.0)
+            
+            # Fade in only genuinely new empty (Add) buttons
+            new_empty_indices = []
+            if new_buttons:
+                for button in new_buttons:
+                    if not (button.config and button.config.get('entity_id')):
+                        button.set_faded(0.0)
+                        new_empty_indices.append(button.slot)
+                if new_empty_indices:
+                    self._fade_in_buttons(new_empty_indices)
+                
+            self.rows_changed.emit()
+            self._pending_rows_update = None
+            
+            # Lock size to new calculated height
+            grid_h = (self._rows * BUTTON_HEIGHT) + ((self._rows - 1) * BUTTON_SPACING)
+            extras = GRID_MARGIN_TOP + GRID_MARGIN_BOTTOM + FOOTER_HEIGHT + FOOTER_MARGIN_BOTTOM + (2 * ROOT_MARGIN)
+            self.setFixedSize(self._fixed_width, int(grid_h + extras))
+            
+            if self._current_view == 'grid':
+                self._fade_in_footer()
+
+        # Update Config & Persist (Rows)
+        if 'appearance' not in self.config: self.config['appearance'] = {}
+        self.config['appearance']['rows'] = self._rows
+        print(f"DASHBOARD: Saving Rows={self._rows}")
+        self.save_config_requested.emit()
+
+        # Chain to width resize check
+        self._check_pending_resize()
+
+    def _get_button_from_pool(self, slot: int) -> DashboardButton:
+        """Get a button from the pool or create a new one."""
+        if self._button_pool:
+            btn = self._button_pool.pop()
+            btn.slot = slot
+            btn.show()
+            # Signals are already connected, but slot is updated on instance
+            return btn
+        
+        # Create new with implicit parent to prevent top-level window spawning
+        # Use grid_widget if available, else container, else self
+        parent = getattr(self, 'grid_widget', getattr(self, 'container', self))
+        
+        button = DashboardButton(slot=slot, theme_manager=self.theme_manager, parent=parent)
+        button.clicked.connect(lambda cfg, btn=button: self._on_button_clicked(btn.slot, cfg))
+        button.dropped.connect(self.on_button_dropped)
+        button.edit_requested.connect(self.edit_button_requested)
+        button.duplicate_requested.connect(self.duplicate_button_requested)
+        button.clear_requested.connect(self.clear_button_requested)
+        button.duplicate_requested.connect(self.duplicate_button_requested)
+        button.clear_requested.connect(self.clear_button_requested)
+        button.dimmer_requested.connect(self._on_dimmer_requested)
+        button.climate_requested.connect(self._on_climate_requested)
+        button.weather_requested.connect(self._on_weather_requested)
+        button.printer_requested.connect(self._on_printer_requested)
+        button.volume_requested.connect(self._on_volume_requested)
+        button.media_command_requested.connect(self.media_command_requested.emit)
+        button.resize_requested.connect(self.handle_button_resize)
+        return button
+
+    def _recycle_button(self, btn: DashboardButton):
+        """Hide and recycle a button."""
+        btn.hide()
+        btn.reset_state()
+        btn.config = {} # Clear config
+        self._button_pool.append(btn)
+
+    def _fade_in_buttons(self, slot_indices: list):
+        """Animate opacity for specific buttons."""
+        for btn in self.buttons:
+            if btn.slot in slot_indices:
+                # Ensure effect is enabled
+                btn._opacity_eff.setEnabled(True)
+                
+                # Create animation
+                anim = QPropertyAnimation(btn._opacity_eff, b"opacity", btn)
+                anim.setStartValue(0.0)
+                anim.setEndValue(1.0)
+                anim.setDuration(600)
+                anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+                
+                # Disable effect when done
+                anim.finished.connect(lambda b=btn: b._opacity_eff.setEnabled(False))
+                
+                anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+    
+    def _check_pending_resize(self):
+        """Called when height animation finishes. Process pending width change if any."""
+        # Lock size after height animation
+        self.setFixedSize(self.width(), self.height())
+        
+        if getattr(self, '_pending_resize_cols', None) is not None:
+             cols = self._pending_resize_cols
+             self._pending_resize_cols = None
+             # Use do_set_cols directly as self._cols is already updated
+             self._do_set_cols(cols)
+
+    def set_cols(self, cols: int):
+        """Set number of columns and rebuild grid."""
+        if self._cols != cols:
+            # Always update _cols and _fixed_width immediately so setup_ui uses the right values
+            self._cols = cols
+            self._fixed_width = calculate_width(cols)
+            if hasattr(self, 'layout_engine'):
+                self.layout_engine.cols = cols
+            
+            if self._current_view == 'settings':
+                self._pending_cols = cols
+                return
+            self._do_set_cols(cols)
+    
+    def _do_set_cols(self, cols: int):
+        """Phase 1: Animate window width (defer grid rebuild)."""
+        # Serialize: If height animation is running, wait for it to finish.
+        if self.height_anim.state() == QPropertyAnimation.State.Running:
+            self._pending_resize_cols = cols
+            return
+            
+        # _cols and layout_engine already updated by set_cols logic
+        
+        # Calculate new width
+        new_width = calculate_width(self._cols)
+        self._fixed_width = new_width
+        start_w = self.width()
+        
+        # Start Animation
+        if start_w != new_width:
+            if self.width_anim.state() == QPropertyAnimation.State.Running:
+                self.width_anim.stop()
+                
+            # Capture RIGHT anchor for animation (if not already?)
+            # Actually anchor is captured in set_anim_width dynamically or init?
+            # Existing code captured it here. Let's keep it safe.
+            self._width_anim_anchor_right = self.x() + self.width()
+
+            # Unlock size constraints for animation (Window)
+            self.setMinimumSize(0, 0)
+            self.setMaximumSize(16777215, 16777215)
+        
+            # Unlock Footer Buttons too (otherwise they block shrinking)
+            if hasattr(self, 'btn_left'):
+                self.btn_left.setMinimumWidth(0)
+                self.btn_left.setMaximumWidth(16777215)
+            if hasattr(self, 'btn_settings'):
+                self.btn_settings.setMinimumWidth(0)
+                self.btn_settings.setMaximumWidth(16777215)
+            
+            self.width_anim.setStartValue(float(start_w))
+            self.width_anim.setEndValue(float(new_width))
+            self.width_anim.start()
+        else:
+            # If no width change needed (e.g. init or redundant call), force finish
+            self._on_width_anim_finished()
+
+    def _on_width_anim_finished(self):
+        """Phase 2: Rebuild grid and fade in new buttons."""
+        # Suppress repaints during bulk UI changes
+        self.setUpdatesEnabled(False)
+        
+        # Update button pool size
         current_slots = len(self.buttons)
-        target_slots = rows * 4
+        target_slots = self._rows * self._cols
+        new_buttons = []
         
         if target_slots > current_slots:
-             for i in range(current_slots, target_slots):
-                button = DashboardButton(slot=i, theme_manager=self.theme_manager)
-                button.clicked.connect(lambda cfg, btn=button: self._on_button_clicked(btn.slot, cfg))
-                button.dropped.connect(self.on_button_dropped)
-                button.edit_requested.connect(self.edit_button_requested)
-                button.duplicate_requested.connect(self.duplicate_button_requested)
-                button.clear_requested.connect(self.clear_button_requested)
-                button.dimmer_requested.connect(self.start_dimmer)
-                button.climate_requested.connect(self.start_climate)
-                button.resize_requested.connect(self.handle_button_resize)
+            for i in range(current_slots, target_slots):
+                button = self._get_button_from_pool(i)
+                button.set_faded(0.0)
                 self.buttons.append(button)
-                
-                # Sync config list
-                if i >= len(self._button_configs):
-                    self._button_configs.append({})
-                    
+                new_buttons.append(button)
         elif target_slots < current_slots:
-             for i in range(current_slots - 1, target_slots - 1, -1):
+            for i in range(current_slots - 1, target_slots - 1, -1):
                 btn = self.buttons.pop()
-                btn.setParent(None)
-                btn.deleteLater()
-                # DON'T delete configs - they should persist so expanding rows restores them
+                self._recycle_button(btn)
         
-        # Re-apply configs to all buttons (important when expanding rows)
-        for i, button in enumerate(self.buttons):
-            config = next(
-                (c for c in self._button_configs if c.get('slot', -1) == i),
-                {}
-            )
-            button.config = config
-            # Apply span and update visual size
-            button.set_spans(config.get('span_x', 1), config.get('span_y', 1))
-            button.update_content()
-            button.update_style()
-            button.set_border_effect(self._border_effect)
-                    
-        # Now layout everything
-        self.rebuild_grid()
+        # Re-apply all configs using (row, col) logic
+        self.set_buttons(self._button_configs, self.config.get('appearance', {}))
+        
+        # FIX: Ensure ALL buttons are fully visible after set_buttons
+        # set_buttons reassigns configs to button widgets sequentially,
+        # so a "new" widget (faded to 0.0) might now hold a configured entity.
+        # We must make everything visible first, then selectively fade-in empty slots.
+        for button in self.buttons:
+            button.set_faded(1.0)
+        
+        # Identify which slots are genuinely new empty (Add) buttons for fade-in
+        new_empty_indices = []
+        for button in new_buttons:
+            if not (button.config and button.config.get('entity_id')):
+                button.set_faded(0.0)  # Pre-fade only empty new slots
+                new_empty_indices.append(button.slot)
+        
+        # Update footer button widths
+        if hasattr(self, 'btn_left'):
+            btn_w = calculate_footer_btn_width(self._cols)
+            self.btn_left.setFixedWidth(btn_w)
+            self.btn_settings.setFixedWidth(btn_w)
+        
         self.update_style()
         
-        # Store grid height
-        grid_h = (self._rows * 80) + ((self._rows - 1) * 8)
-        extras = 78
-        self._grid_height = grid_h + extras
+        # Re-enable updates
+        self.setUpdatesEnabled(True)
+        self.repaint()
         
-        self.rows_changed.emit()
-    
+        # Trigger fade-in for new empty slots
+        if new_empty_indices:
+            self._fade_in_buttons(new_empty_indices)
+        
+        # Update Config & Persist (Cols)
+        if 'appearance' not in self.config: self.config['appearance'] = {}
+        self.config['appearance']['cols'] = self._cols
+        print(f"DASHBOARD: Saving Cols={self._cols}")
+        self.save_config_requested.emit()
+        
+        # Store grid height
+        grid_h = (self._rows * BUTTON_HEIGHT) + ((self._rows - 1) * BUTTON_SPACING)
+        extras = GRID_MARGIN_TOP + GRID_MARGIN_BOTTOM + FOOTER_HEIGHT + FOOTER_MARGIN_BOTTOM + 20
+        self._grid_height = grid_h + extras
+        # Lock only at the VERY end
+        if self.height_anim.state() != QPropertyAnimation.State.Running:
+             self.setFixedSize(self.width(), self.height())
+             
+        # Emit signal
+        self.cols_changed.emit()
+
     def setup_ui(self):
         """Setup the dashboard UI."""
         # Reset layout if exists (not clean, but works for refresh)
@@ -385,8 +874,10 @@ class Dashboard(QWidget):
         # 1. Main Grid
         self.grid_widget = QWidget()
         self.grid = QGridLayout(self.grid_widget)
-        self.grid.setSpacing(8)
-        self.grid.setContentsMargins(12, 12, 12, 8)
+        self.grid.setSpacing(BUTTON_SPACING)
+        self.grid.setContentsMargins(GRID_MARGIN_LEFT, GRID_MARGIN_TOP, GRID_MARGIN_RIGHT, GRID_MARGIN_BOTTOM)
+        # Keep grid right-aligned (User requested Right Anchor)
+        self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight)
         
         # FIX: Wrap Grid in ScrollArea for smooth animation
         self.grid_scroll = FrozenScrollArea()
@@ -400,17 +891,21 @@ class Dashboard(QWidget):
         self.stack_widget.addWidget(self.grid_scroll)
         
         # Create grid buttons
-        total_slots = self._rows * 4
+        total_slots = self._rows * self._cols
         for i in range(total_slots):
-            row = i // 4
-            col = i % 4
+            row = i // self._cols
+            col = i % self._cols
             button = DashboardButton(slot=i, theme_manager=self.theme_manager)
             button.clicked.connect(lambda cfg, btn=button: self._on_button_clicked(btn.slot, cfg))
             button.dropped.connect(self.on_button_dropped)
             button.edit_requested.connect(self.edit_button_requested)
             button.clear_requested.connect(self.clear_button_requested)
-            button.dimmer_requested.connect(self.start_dimmer)
-            button.climate_requested.connect(self.start_climate)
+            button.dimmer_requested.connect(self._on_dimmer_requested)
+            button.climate_requested.connect(self._on_climate_requested)
+            button.weather_requested.connect(self._on_weather_requested)
+            button.printer_requested.connect(self._on_printer_requested)
+            button.volume_requested.connect(self._on_volume_requested)
+            button.volume_scroll.connect(self.volume_scroll_requested.emit)
             self.grid.addWidget(button, row, col)
             self.buttons.append(button)
             
@@ -421,8 +916,8 @@ class Dashboard(QWidget):
         # _fade_in_footer() to avoid "wrapped C/C++ object deleted" crashes.
         
         footer_layout = QHBoxLayout(self.footer_widget)
-        footer_layout.setSpacing(8)
-        footer_layout.setContentsMargins(12, 0, 12, 12)
+        footer_layout.setSpacing(BUTTON_SPACING)
+        footer_layout.setContentsMargins(GRID_MARGIN_LEFT, 0, GRID_MARGIN_RIGHT, FOOTER_MARGIN_BOTTOM)
         
         # Calc standard button width (approx)
         # Layout: 428 total width. Container inner: 408.
@@ -432,11 +927,11 @@ class Dashboard(QWidget):
         # Width = 90 + 8 + 90 = 188px.
         # Height = 1/3 of 80px = ~26px.
         
-        btn_width = 188
-        btn_height = 26
+        btn_width = calculate_footer_btn_width(self._cols)
+        btn_height = FOOTER_HEIGHT
         
         # Left Button (Home Assistant)
-        self.btn_left = QPushButton("  HOME ASSISTANT") # Add space for spacing
+        self.btn_left = FooterButton("  HOME ASSISTANT") # Add space for spacing
         self.btn_left.setFixedSize(btn_width, btn_height)
         self.btn_left.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_left.clicked.connect(self.open_ha)
@@ -469,7 +964,7 @@ class Dashboard(QWidget):
         footer_layout.addWidget(self.btn_left)
         
         # Right Button (Settings) - now calls show_settings directly
-        self.btn_settings = QPushButton("SETTINGS")
+        self.btn_settings = FooterButton("SETTINGS")
         self.btn_settings.setFixedSize(btn_width, btn_height)
         self.btn_settings.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_settings.clicked.connect(self.show_settings)
@@ -491,15 +986,17 @@ class Dashboard(QWidget):
         shadow.setOffset(0, 4)
         self.container.setGraphicsEffect(shadow)
         
+
+
         self.update_style()
         
         # Size Calculation
-        width = 428
+        width = calculate_width(self._cols)
         # Height: Grid rows*80 + (rows-1)*8 + Grid top(12) + Grid bot(8) + Footer(26) + Footer bot(12) + Root margins(20)
         # = (rows*80) + (rows-1)*8 + 12 + 8 + 26 + 12 + 20
         # = (rows*80) + (rows*8) - 8 + 78
-        grid_h = (self._rows * 80) + ((self._rows - 1) * 8)
-        extras = 12 + 8 + 26 + 12 + 20   # 78
+        grid_h = (self._rows * BUTTON_HEIGHT) + ((self._rows - 1) * BUTTON_SPACING)
+        extras = GRID_MARGIN_TOP + GRID_MARGIN_BOTTOM + FOOTER_HEIGHT + FOOTER_MARGIN_BOTTOM + 20   # 78
         height = grid_h + extras
         self.setFixedSize(width, height)
     def open_ha(self):
@@ -512,6 +1009,10 @@ class Dashboard(QWidget):
 
     def update_style(self):
         """Update dashboard style based on theme."""
+        # Ensure overlay manager has latest border effect
+        if hasattr(self, 'overlay_manager'):
+            self.overlay_manager.set_border_effect(self._border_effect)
+
         if self.theme_manager:
             colors = self.theme_manager.get_colors()
         else:
@@ -520,10 +1021,23 @@ class Dashboard(QWidget):
                 'border': '#555555',
             }
         
+        # Glass UI: use semi-transparent tint over blurred desktop
+        if self._glass_ui:
+            is_light = (self.theme_manager and self.theme_manager.get_effective_theme() == 'light')
+            if is_light:
+                bg_color = 'rgba(240, 240, 240, 120)'
+                border_color = 'rgba(0, 0, 0, 0.10)'
+            else:
+                bg_color = 'rgba(20, 20, 20, 100)'
+                border_color = 'rgba(255, 255, 255, 0.12)'
+        else:
+            bg_color = colors['window']
+            border_color = colors['border']
+        
         self.container.setStyleSheet(f"""
             QFrame#dashboardContainer {{
-                background-color: {colors['window']};
-                border: 1px solid {colors['border']};
+                background-color: {bg_color};
+                border: 1px solid {border_color};
                 border-radius: 12px;
             }}
             QMenu {{
@@ -575,7 +1089,6 @@ class Dashboard(QWidget):
 
     def keyPressEvent(self, event):
         """Handle keyboard shortcuts."""
-        # print(f"DEBUG: KeyPress {event.key()} Mods: {event.modifiers()}")
         
         # 1. Custom Shortcuts (Highest Priority)
         for button in self.buttons:
@@ -587,48 +1100,7 @@ class Dashboard(QWidget):
                     event.accept()
                     return
 
-        # 2. Global Shortcuts (Modifier + Number)
-        # Check modifier
-        modifier_map = {
-            'Alt': Qt.KeyboardModifier.AltModifier,
-            'Ctrl': Qt.KeyboardModifier.ControlModifier,
-            'Shift': Qt.KeyboardModifier.ShiftModifier
-        }
-        
-        shortcut_config = self.config.get('shortcut', {}) if self.config else {}
-        target_mod_str = shortcut_config.get('modifier', 'Alt')
-        
-        should_process = False
-        if target_mod_str == 'None':
-             # Only process if NO modifiers are pressed to perfectly match 'None'
-             if event.modifiers() == Qt.KeyboardModifier.NoModifier:
-                 should_process = True
-        else:
-            target_mod = modifier_map.get(target_mod_str)
-            # Strict match? Or just "contains"?
-            # User wants "Alt+1". If I press "Ctrl+Alt+1", shoud it work? 
-            # Usually strict is better to avoid conflict with complex global shortcuts.
-            # But the original code was: (event.modifiers() & target_mod)
-            # This allows extra modifiers.
-            if target_mod and (event.modifiers() & target_mod):
-                should_process = True
-        
-        if should_process:
-            key = event.key()
-            if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
-                slot = key - Qt.Key.Key_1
-                if 0 <= slot < len(self.buttons):
-                    # Check if this button has custom shortcut enabled
-                    # If so, GLOBAL shortcut should be ignored for THIS button
-                    btn = self.buttons[slot]
-                    sc = btn.config.get('custom_shortcut', {})
-                    if sc.get('enabled'):
-                        # print(f"DEBUG: Ignoring global shortcut for button {slot} due to custom override")
-                        pass 
-                    else:
-                        btn.simulate_click()
-                        event.accept()
-                        return
+
 
         super().keyPressEvent(event)
         
@@ -716,71 +1188,155 @@ class Dashboard(QWidget):
                 
         return False
     
-    def set_buttons(self, configs: list[dict], appearance_config: dict = None):
-        """Set button configurations."""
+    def set_buttons(self, configs: list[dict], appearance_config: dict = None, update_height=True):
+        """Set button configurations using (row, col) based positioning."""
         self._button_configs = configs
         if appearance_config:
             self._live_dimming = True
             self._border_effect = appearance_config.get('border_effect', 'Rainbow')
+            self._show_dimming = appearance_config.get('show_dimming', False)
+            self._glass_ui = appearance_config.get('glass_ui', False)
+            self._button_style = appearance_config.get('button_style', 'Gradient')
         
-        for i, button in enumerate(self.buttons):
-            config = next(
-                (c for c in configs if c.get('slot', -1) == i),
-                None
-            )
+        # Ensure we have enough button widgets for the visible grid
+        target_slots = self._rows * self._cols
+        while len(self.buttons) < target_slots:
+            button = self._get_button_from_pool(len(self.buttons))
+            self.buttons.append(button)
             
-            # Reset state if entity changed
-            new_entity = config.get('entity_id') if config else None
-            old_entity = button.config.get('entity_id')
-            if new_entity != old_entity:
-                button._state = "off"
-                button._value = ""
-            
-            button.config = config or {}
-            # Button's slot stays as its array index (i), not config's slot
-            # Apply span dimensions from config
-            button.set_spans(
-                button.config.get('span_x', 1),
-                button.config.get('span_y', 1)
-            )
-            button.update_content()
-            button.update_style()
-            # Propagate effect
-            button.set_border_effect(self._border_effect)
-            
-            # ENSURE connection (fix for missing signal)
-            try:
-                button.resize_requested.disconnect(self.handle_button_resize)
-            except TypeError:
-                pass # Not connected
-            button.resize_requested.connect(self.handle_button_resize)
-            
-            try:
-                button.resize_finished.disconnect(self.handle_button_resize_finished)
-            except TypeError:
-                pass
-            button.resize_finished.connect(self.handle_button_resize_finished)
-            
-            try:
-                button.duplicate_requested.disconnect(self.duplicate_button_requested)
-            except TypeError:
-                pass
-            button.duplicate_requested.connect(self.duplicate_button_requested)
+        # Clear virtual buttons (prevent stale collisions)
+        self._virtual_buttons = []
         
-        # Rebuild grid to properly layout spanned buttons
-        self.rebuild_grid()
+        # Reset all buttons to empty first
+        for button in self.buttons:
+            button.config = {}
+            button.set_spans(1, 1)
+        
+        # Assign configs to buttons
+        # Each config with (row, col) gets assigned to a button widget
+        config_idx = 0
+        for cfg in configs:
+            if not cfg.get('entity_id'):
+                continue
+            
+            # Skip if config is strictly out of bounds
+            # This prevents hidden buttons from consuming widgets, which would starve visible buttons
+            r = cfg.get('row', 0)
+            c = cfg.get('col', 0)
+            sx = cfg.get('span_x', 1)
+            sy = cfg.get('span_y', 1)
+            
+            # Check for partial overlap vs complete miss
+            if c >= self._cols or r >= self._rows:
+                 # Starting position is outside grid -> Completely hidden
+                 continue
+
+            if c + sx > self._cols or r + sy > self._rows:
+                # Partially overlaps visible area -> Track as VirtualButton
+                # This ensures the layout engine knows about it and marks intersecting cells as forbidden
+                if not hasattr(self, '_virtual_buttons'): self._virtual_buttons = []
+                self._virtual_buttons.append(VirtualButton(cfg))
+                continue
+            
+            # Find a free button widget to use for this config
+            if config_idx < len(self.buttons):
+                button = self.buttons[config_idx]
+                config_idx += 1
+                
+                # Reset state if entity changed
+                old_entity = button.config.get('entity_id')
+                new_entity = cfg.get('entity_id')
+                
+                button.config = cfg
+                
+                if old_entity != new_entity:
+                    button.reset_state()
+                    if new_entity and new_entity in self._entity_states:
+                        button.apply_ha_state(self._entity_states[new_entity])
+                
+                button.set_spans(sx, sy)
+                button.update_content()
+                button.button_style = getattr(self, '_button_style', 'Gradient')
+                button.update_style()
+                button.set_border_effect(self._border_effect)
+                button.show_dimming = self._show_dimming
+                
+                # ENSURE connection (fix for missing signal)
+                try:
+                    button.resize_requested.disconnect(self.handle_button_resize)
+                except TypeError:
+                    pass
+                button.resize_requested.connect(self.handle_button_resize)
+                
+                try:
+                    button.resize_finished.disconnect(self.handle_button_resize_finished)
+                except TypeError:
+                    pass
+                button.resize_finished.connect(self.handle_button_resize_finished)
+                
+                try:
+                    button.duplicate_requested.disconnect(self.duplicate_button_requested)
+                except TypeError:
+                    pass
+                button.duplicate_requested.connect(self.duplicate_button_requested)
+        
+        # Remaining buttons are empty "Add" buttons — update their style too
+        for i in range(config_idx, len(self.buttons)):
+            self.buttons[i].update_content()
+            self.buttons[i].button_style = getattr(self, '_button_style', 'Gradient')
+            self.buttons[i].update_style()
+            self.buttons[i].set_border_effect(self._border_effect)
+        
+        # Rebuild grid to properly layout
+        self.rebuild_grid(update_height=update_height)
 
 
-    # (Duplicate methods removed)
+
 
 
     def set_effect(self, effect_name: str):
         """Set the active border effect."""
         self._effect = effect_name
+        if hasattr(self, 'overlay_manager'):
+            self.overlay_manager.set_border_effect(effect_name)
         self.update()
 
     def paintEvent(self, event):
         """Paint overlay and effects."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Glass UI: Draw frosted desktop blur behind the container
+        if self._glass_ui and hasattr(self, '_glass_bg_pixmap') and self._glass_bg_pixmap:
+            container_geo = self.container.geometry()
+            
+            # Clip to container's rounded rect
+            clip_path = QPainterPath()
+            clip_path.addRoundedRect(QRectF(container_geo), 12, 12)
+            painter.setClipPath(clip_path)
+            
+            # Calculate offset to keep background fixed relative to screen (parallax/static effect)
+            # If window is lower than capture (expanding/shrinking), we shift drawing up
+            # Global Y of drawing area = self.y() + container_geo.y()
+            # Global Y of pixmap = self._glass_capture_pos.y()
+            
+            current_global_y = self.y() + container_geo.y()
+            diff_y = current_global_y - self._glass_capture_pos.y()
+            
+            # Draw at (container_x, container_y - diff_y) to align
+            draw_pos = QPoint(int(container_geo.x()), int(container_geo.y() - diff_y))
+            
+            # Draw the blurred desktop
+            painter.drawPixmap(draw_pos, self._glass_bg_pixmap)
+            
+            painter.setClipPath(QPainterPath())  # Reset clip
+        
+        # Ensure window receives mouse events (transparent windows pass events through on Windows)
+        painter.setBrush(QColor(0, 0, 0, 1))  # Alpha 1/255
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRect(self.rect())
+        painter.end()
+
         # Only draw if animating and effect is active
         # Use border_anim state to control drawing duration
         if self.border_anim.state() == QPropertyAnimation.State.Running:
@@ -788,6 +1344,10 @@ class Dashboard(QWidget):
                 self._draw_rainbow_border()
             elif self._border_effect == 'Aurora Borealis':
                 self._draw_aurora_border()
+            elif self._border_effect == 'Prism Shard':
+                self._draw_prism_shard_border()
+            elif self._border_effect == 'Liquid Mercury':
+                self._draw_liquid_mercury_border()
 
     def _draw_aurora_border(self):
         """Draw the Aurora Borealis border effect."""
@@ -853,433 +1413,221 @@ class Dashboard(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         
         painter.drawRoundedRect(rect, 12, 12)
+
+    def _draw_prism_shard_border(self):
+        """Draw the Prism Shard border effect."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        angle = self._border_progress * 360.0 * 0.9
+        
+        opacity = 1.0
+        if self._border_progress > 0.8:
+            opacity = (1.0 - self._border_progress) / 0.2
+        painter.setOpacity(opacity)
+        
+        rect = QRectF(self.container.geometry()).adjusted(0, 0, 0, 0)
+        
+        # Muted jewel tones: Muted Cyan -> Muted Magenta -> Muted Yellow -> Blue-Gray
+        colors = ["#26C6DA", "#EC407A", "#FFCA28", "#CFD8DC", "#26C6DA"]
+        
+        gradient = QConicalGradient(rect.center(), angle)
+        for i, color in enumerate(colors):
+            gradient.setColorAt(i / (len(colors) - 1), QColor(color))
+        
+        pen = QPen()
+        pen.setWidth(3)
+        pen.setBrush(QBrush(gradient))
+        
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        
+        painter.drawRoundedRect(rect, 12, 12)
+
+    def _draw_liquid_mercury_border(self):
+        """Draw the Liquid Mercury border effect."""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        angle = self._border_progress * 360.0 * 1.2
+        
+        opacity = 1.0
+        if self._border_progress > 0.8:
+            opacity = (1.0 - self._border_progress) / 0.2
+        painter.setOpacity(opacity)
+        
+        rect = QRectF(self.container.geometry()).adjusted(0, 0, 0, 0)
+        
+        # Gunmetal Chrome palette
+        colors = ["#37474F", "#78909C", "#CFD8DC", "#ECEFF1", "#CFD8DC", "#78909C", "#37474F"]
+        
+        gradient = QConicalGradient(rect.center(), angle)
+        for i, color in enumerate(colors):
+            gradient.setColorAt(i / (len(colors) - 1), QColor(color))
+        
+        pen = QPen()
+        pen.setWidth(3)
+        pen.setBrush(QBrush(gradient))
+        
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        
+        painter.drawRoundedRect(rect, 12, 12)
             
-    def start_dimmer(self, slot: int, global_rect: QRect):
-        """Start the dimmer morph sequence."""
-        # Find config
-        config = next((c for c in self._button_configs if c.get('slot') == slot), None)
-        if not config: return
+    def _on_dimmer_requested(self, slot: int, rect: QRect):
+        config = self._get_button_config(slot)
+        self.overlay_manager.start_dimmer(slot, rect, config)
         
-        entity_id = config.get('entity_id')
-        if not entity_id: return
+    def _on_climate_requested(self, slot: int, rect: QRect):
+        config = self._get_button_config(slot)
+        self.overlay_manager.start_climate(slot, rect, config)
         
-        self._active_dimmer_entity = entity_id
-        self._active_dimmer_type = config.get('type', 'switch')  # Track type for service call
+    def _on_weather_requested(self, slot: int, rect: QRect):
+        config = self._get_button_config(slot)
         
-        # Get start value based on state
-        source_btn = next((b for b in self.buttons if b.slot == slot), None)
-        current_val = 0
+        # Emit a special signal to request the main app to fetch forecast
+        # and then call self.overlay_manager.start_weather
+        # So we need a signal for it.
+        # Wait, if we use a pyqtSignal, we can just emit an action dict to main app
+        # and have a callback passed in.
         
-        # Look up full state for attributes
-        state_obj = self._entity_states.get(entity_id, {})
-        attrs = state_obj.get('attributes', {})
+        # Actually I need a way to fetch the forecast. Let's emit a signal.
+        self.weather_forecast_requested.emit(slot, rect, config)
         
-        if self._active_dimmer_type == 'curtain':
-            # Check for specific position attribute
-            pos = attrs.get('current_position')
-            if pos is not None:
-                current_val = int(pos)
-            elif source_btn:
-                # Fallback to binary state
-                current_val = 100 if source_btn._state == "open" else 0
-        else:
-            # Check for brightness (0-255)
-            bri = attrs.get('brightness')
-            if bri is not None:
-                current_val = int((bri / 255.0) * 100)
-            elif source_btn:
-                # Fallback to binary state
-                current_val = 100 if source_btn._state == "on" else 0
-        
-        # Colors - always use dark base for overlay visibility
-        base_color = QColor("#2d2d2d")
-        
-        # Use button's custom color if set, otherwise theme accent
-        button_color = config.get('color')
-        accent_color = QColor(button_color) if button_color else QColor("#FFD700")
-        
-        if self.theme_manager and not button_color:
-            cols = self.theme_manager.get_colors()
-            accent_color = QColor(cols.get('accent', '#FFD700'))
-            
-        # Calculate geometries
-        start_rect = self.mapFromGlobal(global_rect.topLeft())
-        start_rect = QRect(start_rect, global_rect.size())
-        
-        # Target: Full row width starting from container's grid area
-        # Use source button's actual position for target rect calculation
-        # Use mapTo(self, QPoint(0,0)) for robust coordinate conversion
-        src_pos = source_btn.mapTo(self, QPoint(0, 0))
-        
-        # Identify siblings for fading - use visual row based on Y position
-        self._dimmer_siblings = []
-        self._dimmer_source_btn = None  # Track source button separately
-        
-        # Find all buttons in the same visual row (by Y position overlap)
-        src_top = src_pos.y()
-        src_bottom = src_pos.y() + source_btn.height()
-        
-        row_buttons = []
+    def _on_volume_requested(self, slot: int, rect: QRect):
+        config = self._get_button_config(slot)
+        self.overlay_manager.start_volume(slot, rect, config)
+
+    def _on_printer_requested(self, slot: int, rect: QRect, config: dict):
+        self.overlay_manager.start_printer(slot, rect, config)
+
+    def _get_button_config(self, slot: int):
+        row = slot // self._cols
+        col = slot % self._cols
+        return next((c for c in self._button_configs if c.get('row') == row and c.get('col') == col), {})
+
+
+    def update_media_art(self, entity_id: str, pixmap: QPixmap):
+        """Update media art for a specific entity."""
+        # Update internal state cache? Or just push to button?
+        # Find buttons
         for btn in self.buttons:
-            btn_pos = btn.mapTo(self, QPoint(0, 0))
-            btn_top = btn_pos.y()
-            btn_bottom = btn_pos.y() + btn.height()
-            # Check if this button overlaps vertically with source
-            if btn_top < src_bottom and btn_bottom > src_top:
-                row_buttons.append((btn, btn_pos))
-        
-        # Calculate target_rect from actual row button positions
-        if row_buttons:
-            # Find leftmost and rightmost buttons
-            row_buttons.sort(key=lambda x: x[1].x())
-            first_btn, first_pos = row_buttons[0]
-            last_btn, last_pos = row_buttons[-1]
-            
-            # Target spans from first button to end of last button
-            target_x = first_pos.x()
-            target_width = (last_pos.x() + last_btn.width()) - first_pos.x()
-            
-            # Use source button height for uniform overlay height? 
-            # Or max height of row? 
-            # Climate uses source_btn.height(). Dimmer usually replaces the row.
-            # If we have mixed heights, using source_btn.height() aligns with the clicked element.
-            target_rect = QRect(target_x, src_pos.y(), target_width, source_btn.height())
-            
-            # Sibling fading setup
-            for btn, _ in row_buttons:
-                if btn.slot != slot:
-                    self._dimmer_siblings.append(btn)
-                else:
-                    self._dimmer_source_btn = btn  # Store source
-                    btn.set_faded(0.0)  # Hide source button immediately
-        else:
-            # Fallback
-            target_rect = QRect(src_pos, source_btn.size())
-            
-        # Start!
-        self.dimmer_overlay.set_border_effect(self._border_effect)
-        self.dimmer_overlay.start_morph(
-            start_rect, 
-            target_rect, 
-            current_val, 
-            config.get('label', 'Dimmer'),
-            color=accent_color,
-            base_color=base_color
-        )
-        
-        self.dimmer_timer.start()
+             if btn.config.get('entity_id') == entity_id and btn.config.get('type') == 'media_player':
+                 btn.set_album_art(pixmap)
+                 
 
-    def on_morph_changed(self, progress: float):
-        """Update sibling opacity during morph."""
-        opacity = 1.0 - progress
-        for btn in getattr(self, '_dimmer_siblings', []):
-            btn.set_faded(opacity)
-
-    def on_dimmer_value_changed(self, value):
-        """Queue dimming request."""
-        self._pending_dimmer_val = value
-
-    def on_dimmer_finished(self):
-        """Cleanup after dimmer closes."""
-        self.dimmer_timer.stop()
-        
-        # For curtains, send the final position only on release
-        dimmer_type = getattr(self, '_active_dimmer_type', 'switch')
-        final_val = getattr(self, '_final_dimmer_val', None)
-        
-        if dimmer_type == 'curtain' and final_val is not None and self._active_dimmer_entity:
-            # Send final curtain position
-            self.button_clicked.emit({
-                "service": "cover.set_cover_position",
-                "entity_id": self._active_dimmer_entity,
-                "service_data": {"position": final_val}
-            })
-        
-        elif dimmer_type != 'curtain' and final_val is not None and self._active_dimmer_entity:
-            # Send final brightness for lights (ensures update if live dimming was off)
-            self.button_clicked.emit({
-                "service": "light.turn_on",
-                "entity_id": self._active_dimmer_entity,
-                "service_data": {"brightness_pct": final_val},
-                "skip_debounce": True
-            })
-        
-        self._active_dimmer_entity = None
-        self._active_dimmer_type = None
-        self._pending_dimmer_val = None
-        self._final_dimmer_val = None
-        
-        # Reset siblings
-        for btn in getattr(self, '_dimmer_siblings', []):
-            btn.set_faded(1.0)
-        
-        # Restore source button
-        if getattr(self, '_dimmer_source_btn', None):
-            self._dimmer_source_btn.set_faded(1.0)
-            self._dimmer_source_btn = None
-             
-        self._dimmer_siblings = []
-        self.activateWindow() # Reclaim focus
-
-    def process_pending_dimmer(self):
-        """Throttled service call."""
-        if self._pending_dimmer_val is None or not self._active_dimmer_entity:
-            return
-            
-        val = self._pending_dimmer_val
-        self._pending_dimmer_val = None # Clear pending
-        
-        # Call appropriate service based on entity type
-        dimmer_type = getattr(self, '_active_dimmer_type', 'switch')
-        
-        # Always store the latest value as the potential final value
-        self._final_dimmer_val = val
-        
-        if dimmer_type == 'curtain':
-            # Curtains: Only store value, send on release (in on_dimmer_finished)
-            return
-        
-        # Check live dimming setting (only applies to lights)
-        if not getattr(self, '_live_dimming', True):
-            return
-
-        # Lights use light.turn_on with brightness
-        self.button_clicked.emit({
-            "service": "light.turn_on",
-            "entity_id": self._active_dimmer_entity,
-            "service_data": {"brightness_pct": val},
-            "skip_debounce": True
-        })
-
-    # ============ CLIMATE CONTROL ============
-    
-    climate_value_changed = pyqtSignal(str, float)  # (entity_id, temperature)
-    
-    def start_climate(self, slot: int, global_rect: QRect):
-        """Start the climate morph sequence."""
-        # Find config
-        config = next((c for c in self._button_configs if c.get('slot') == slot), None)
-        if not config: return
-        
-        entity_id = config.get('entity_id')
-        if not entity_id: return
-        
-        self._active_climate_entity = entity_id
-        
-        # Get current target temp from button value or default
-        source_btn = next((b for b in self.buttons if b.slot == slot), None)
-        current_val = 20.0  # Default
-        if source_btn and source_btn._value:
-            try:
-                # Parse temperature from value string like "20.5°C"
-                temp_str = source_btn._value.replace('°C', '').replace('°', '').strip()
-                current_val = float(temp_str)
-            except:
-                pass
-        
-        # Colors - always use dark base for overlay visibility
-        base_color = QColor("#2d2d2d")
-        button_color = config.get('color')
-        accent_color = QColor(button_color) if button_color else QColor("#EA4335")
-        
-        if self.theme_manager and not button_color:
-            cols = self.theme_manager.get_colors()
-            accent_color = QColor(cols.get('accent', '#EA4335'))
-            
-        # Calculate geometries using source button's actual position
-        start_rect = self.mapFromGlobal(global_rect.topLeft())
-        start_rect = QRect(start_rect, global_rect.size())
-        
-        # Get source button's actual grid position 
-        source_btn = next((b for b in self.buttons if b.slot == slot), None)
-        if not source_btn:
-            return
-            
-        # Use source button's actual position for target rect calculation
-        # Use mapTo(self, QPoint(0,0)) for robust coordinate conversion
-        src_pos = source_btn.mapTo(self, QPoint(0, 0))
-        
-        # Target: Full row width starting from container's grid area
-        # Get the grid area by finding leftmost button position
-        
-        # Identify siblings for fading - use visual row based on Y position
-        self._climate_siblings = []
-        self._climate_source_btn = None  # Track source button separately
-        
-        # Find all buttons in the same visual row (by Y position overlap)
-        src_top = src_pos.y()
-        src_bottom = src_pos.y() + source_btn.height()
-        
-        row_buttons = []
-        row_buttons = []
-        for btn in self.buttons:
-            # Check if this button overlaps vertically with source
-            btn_pos = btn.mapTo(self, QPoint(0, 0))
-            btn_top = btn_pos.y()
-            btn_bottom = btn_pos.y() + btn.height()
-            # Check if this button overlaps vertically with source
-            if btn_top < src_bottom and btn_bottom > src_top:
-                row_buttons.append((btn, btn_pos))
-        
-        # Calculate target_rect from actual row button positions
-        if row_buttons:
-            # Find leftmost and rightmost buttons
-            row_buttons.sort(key=lambda x: x[1].x())
-            first_btn, first_pos = row_buttons[0]
-            last_btn, last_pos = row_buttons[-1]
-            
-            # Target spans from first button to end of last button
-            target_x = first_pos.x()
-            target_width = (last_pos.x() + last_btn.width()) - first_pos.x()
-            target_rect = QRect(target_x, src_pos.y(), target_width, source_btn.height())
-        else:
-            # Fallback to source button rect
-            target_rect = QRect(src_pos, source_btn.size())
-        
-        # Sibling fading setup (EXCLUDE source button)
-        advanced_mode = config.get('advanced_mode', False)
-        
-        for btn, btn_pos in row_buttons:
-            if btn.slot != slot:
-                self._climate_siblings.append(btn)
-            else:
-                self._climate_source_btn = btn  # Store source
-                btn.set_faded(0.0)  # Hide source button immediately
-        
-        # TODO: Handle advanced_mode expansion to adjacent rows if needed
-        
-        # Start!
-        self.climate_overlay.set_border_effect(self._border_effect)
-        
-        # Lookup full state for advanced controls
-        state_obj = self._entity_states.get(entity_id, {})
-        
-        self.climate_overlay.start_morph(
-            start_rect, 
-            target_rect, 
-            current_val, 
-            config.get('label', 'Climate'),
-            color=accent_color,
-            base_color=base_color,
-            advanced_mode=config.get('advanced_mode', False),
-            current_state=state_obj
-        )
-        
-        self.climate_timer.start()
-
-    def on_climate_morph_changed(self, progress: float):
-        """Update sibling opacity during morph."""
-        opacity = 1.0 - progress
-        for btn in getattr(self, '_climate_siblings', []):
-            btn.set_faded(opacity)
-
-    def on_climate_value_changed(self, value: float):
-        """Queue climate temperature request."""
-        self._pending_climate_val = value
-
-    def on_climate_mode_changed(self, mode: str):
-        """Handle HVAC mode change (immediate)."""
-        if not self._active_climate_entity: return
-        
-        self.button_clicked.emit({
-            "service": "climate.set_hvac_mode",
-            "entity_id": self._active_climate_entity,
-            "service_data": {"hvac_mode": mode}
-        })
-        
-    def on_climate_fan_changed(self, mode: str):
-        """Handle Fan mode change (immediate)."""
-        if not self._active_climate_entity: return
-        
-        self.button_clicked.emit({
-            "service": "climate.set_fan_mode",
-            "entity_id": self._active_climate_entity,
-            "service_data": {"fan_mode": mode}
-        })
-
-    def on_climate_finished(self):
-        """Cleanup after climate closes."""
-        self.climate_timer.stop()
-        self._active_climate_entity = None
-        self._pending_climate_val = None
-        
-        # Reset siblings
-        for btn in getattr(self, '_climate_siblings', []):
-             btn.set_faded(1.0)
-        
-        # Restore source button
-        if getattr(self, '_climate_source_btn', None):
-            self._climate_source_btn.set_faded(1.0)
-            self._climate_source_btn = None
-             
-        self._climate_siblings = []
-        self.activateWindow()
-
-    def process_pending_climate(self):
-        """Throttled climate service call."""
-        if self._pending_climate_val is None or not self._active_climate_entity:
-            return
-            
-        val = self._pending_climate_val
-        self._pending_climate_val = None
-        
-        # Emit signal for main.py to handle
-        self.climate_value_changed.emit(self._active_climate_entity, val)
 
     def update_entity_state(self, entity_id: str, state: dict):
         """Update a button/widget when entity state changes."""
         self._entity_states[entity_id] = state
         
         for button in self.buttons:
-            if button.config.get('entity_id') == entity_id:
-                btn_type = button.config.get('type', 'switch')
-                
-                if btn_type == 'widget':
-                    # Update sensor value
-                    value = state.get('state', '--')
-                    unit = state.get('attributes', {}).get('unit_of_measurement', '')
-                    button.set_value(f"{value}{unit}")
-                elif btn_type == 'climate':
-                    # Update climate target temperature
-                    attrs = state.get('attributes', {})
-                    temp = attrs.get('temperature', '--')
-                    if temp != '--':
-                        button.set_value(f"{temp}°C")
-                    else:
-                        button.set_value("--°C")
-                    # Also update state for styling
-                    hvac_action = state.get('state', 'off')
-                    button.set_state('on' if hvac_action not in ['off', 'unavailable'] else 'off')
-                elif btn_type == 'curtain':
-                    # Update curtain state (open/closed/opening/closing)
-                    cover_state = state.get('state', 'closed')
-                    # "open" when cover is up/open, anything else is closed
-                    button.set_state('open' if cover_state == 'open' else 'closed')
-                elif btn_type == 'weather':
-                    # Update weather state - pass full object for attributes
-                    button.set_weather_state(state)
-                else:
-                    # Update switch state
-                    button.set_state(state.get('state', 'off'))
+            cfg = button.config
+            if not cfg: continue
+            
+            # Standard entity match
+            if cfg.get('entity_id') == entity_id:
+                button.apply_ha_state(state)
+            
+            # 3D Printer handles multiple entities
+            elif cfg.get('type') == '3d_printer':
+                if entity_id == cfg.get('printer_state_entity'):
+                    button.apply_ha_state(state) # Primary state
+                elif entity_id in (cfg.get('printer_camera_entity'), cfg.get('printer_nozzle_entity'), cfg.get('printer_bed_entity')):
+                    button.update_content() # Just trigger a redraw, dashboard_button_painter will fetch the latest state from _entity_states
+        
+        # Forward to overlay manager
+        self.overlay_manager.update_entity_state(entity_id, state)
     
     def update_camera_image(self, entity_id: str, pixmap):
         """Update a camera button with a new image."""
         for button in self.buttons:
-            if button.config.get('entity_id') == entity_id and button.config.get('type') == 'camera':
+            cfg = button.config
+            if not cfg: continue
+            
+            if cfg.get('entity_id') == entity_id and cfg.get('type') == 'camera':
                 button.set_camera_image(pixmap)
-    
+            elif cfg.get('type') == '3d_printer' and cfg.get('printer_camera_entity') == entity_id:
+                button.set_camera_image(pixmap)
+                
+        # Forward to overlay manager
+        self.overlay_manager.update_camera_image(entity_id, pixmap)
+                
+    def apply_camera_cache(self, cache: dict):
+        """Apply cached camera images to matching buttons."""
+        for entity_id, cache_data in cache.items():
+            if isinstance(cache_data, tuple) and len(cache_data) == 2:
+                _, pixmap = cache_data
+                self.update_camera_image(entity_id, pixmap)
+
     def _on_button_clicked(self, slot: int, config: dict):
         """Handle button click."""
+        if config and config.get('type') == 'forbidden':
+            return  # Forbidden slots are not interactive
         if not config:
             self.add_button_clicked.emit(slot)
         else:
             self.button_clicked.emit(config)
+
 
     def on_button_dropped(self, source: int, target: int):
         self.buttons_reordered.emit(source, target)
     
     def on_theme_changed(self, theme: str):
         self.update_style()
+    
+    def _capture_glass_background(self, target_height: int = None):
+        """Capture and blur the desktop area behind the window for frosted glass."""
+        if not self._glass_ui:
+            self._glass_bg_pixmap = None
+            return
+        
+        screen = QApplication.primaryScreen()
+        if not screen:
+            self._glass_bg_pixmap = None
+            return
+        
+        # Geometry logic
+        c_x = self.container.x()
+        c_w = self.container.width()
+        
+        screen_geo = screen.geometry()
+        
+        # Capture the entire vertical column for this window to avoid needing
+        # to recapture when animating height changes, which caused the UI itself to get captured.
+        grab_x = self.x() + c_x
+        grab_y = screen_geo.y()
+        grab_w = c_w
+        grab_h = screen_geo.height()
+        
+        # Safety: ensure valid dimensions
+        if grab_w <= 0: grab_w = self.width() - 20
+        if grab_w <= 0: grab_w = 100 # Fallback
+        if grab_h <= 0: grab_h = 1080 # Fallback
+        
+        # Grab the screen region
+        desktop_pixmap = screen.grabWindow(0, int(grab_x), int(grab_y), int(grab_w), int(grab_h))
+        
+        if desktop_pixmap.isNull():
+            self._glass_bg_pixmap = None
+            return
+        
+        # Apply downscale → upscale blur (same technique as label pill)
+        blur_factor = 0.06  # Very heavy blur
+        small = desktop_pixmap.scaled(
+            max(1, int(grab_w * blur_factor)),
+            max(1, int(grab_h * blur_factor)),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        blurred = small.scaled(
+            int(grab_w), int(grab_h),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        
+        self._glass_bg_pixmap = blurred
+        self._glass_capture_pos = QPoint(int(grab_x), int(grab_y))
     
     def show_near_tray(self):
         """Position and show the dashboard near the system tray."""
@@ -1290,11 +1638,21 @@ class Dashboard(QWidget):
         
         screen_rect = screen.availableGeometry()
         
-        # Calculate target position but don't move there yet
+        # Calculate target position
         target_x = screen_rect.right() - self.width() - 10
         target_y = screen_rect.bottom() - self.height() - 10
         
         self._target_pos = QPoint(target_x, target_y)
+        
+        # Set initial state (Hidden & Positioned) BEFORE showing
+        # This prevents the window from flashing in the center/wrong place
+        self.set_anim_progress(0.0)
+        
+        # Capture frosted glass background BEFORE showing (so we grab the clean desktop)
+        if self._glass_ui:
+            # Position the window first so geometry is correct for capture
+            self.move(target_x, target_y)
+            self._capture_glass_background()
         
         # Ensure we are visible before animating
         super().show()
@@ -1357,6 +1715,9 @@ class Dashboard(QWidget):
     
     def _check_hide(self):
         # If we are not the active window, close.
+        if self._ignore_focus_loss:
+            return
+            
         if not self.isActiveWindow():
             self.close_animated()
             
@@ -1405,8 +1766,6 @@ class Dashboard(QWidget):
         self._settings_input_manager = input_manager
         
         # IMPORT Settings Widget
-        from ui.settings_widget import SettingsWidget
-        
         self.settings_widget = SettingsWidget(config, self.theme_manager, input_manager, self.version, self)
         self.settings_widget.back_requested.connect(self.hide_settings)
         self.settings_widget.settings_saved.connect(self._on_settings_saved)
@@ -1432,40 +1791,50 @@ class Dashboard(QWidget):
         self._cached_settings_height = None
 
         # Init Button Editor (Embedded)
-        try:
-            from ui.button_edit_widget import ButtonEditWidget
-            # Create a placeholder instance to be ready
-            self.edit_widget = ButtonEditWidget([], theme_manager=self.theme_manager, input_manager=self.input_manager, parent=self)
-            self.edit_widget.saved.connect(self._on_edit_saved)
-            self.edit_widget.cancelled.connect(self._on_edit_cancelled)
-            
-            self.edit_scroll = QScrollArea()
-            self.edit_scroll.setWidget(self.edit_widget)
-            self.edit_scroll.setWidgetResizable(True)
-            self.edit_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            self.edit_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-            self.edit_scroll.setStyleSheet("background: transparent; border: none;")
-            self.edit_scroll.setFrameShape(QFrame.Shape.NoFrame)
-            # Disable wheel scrolling - content should fit
-            self.edit_scroll.wheelEvent = lambda e: e.ignore()
-            
-            self.stack_widget.addWidget(self.edit_scroll)
-        except ImportError:
-            print("Could not import ButtonEditWidget")
+        # Create a placeholder instance to be ready
+        self.edit_widget = ButtonEditWidget([], theme_manager=self.theme_manager, input_manager=self.input_manager, parent=self)
+        self.edit_widget.saved.connect(self._on_edit_saved)
+        self.edit_widget.cancelled.connect(self._on_edit_cancelled)
+        self.edit_widget.size_changed.connect(self._on_edit_size_changed)
+        
+        self.edit_scroll = QScrollArea()
+        self.edit_scroll.setWidget(self.edit_widget)
+        self.edit_scroll.setWidgetResizable(True)
+        self.edit_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.edit_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.edit_scroll.setStyleSheet("background: transparent; border: none;")
+        self.edit_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # Disable wheel scrolling - content should fit
+        self.edit_scroll.wheelEvent = lambda e: e.ignore()
+        
+        self.stack_widget.addWidget(self.edit_scroll)
 
     def _on_settings_saved(self, config: dict):
         """Handle settings saved - emit signal and return to grid."""
         if self.settings_widget:
             self.settings_widget.set_opacity(1.0) # Reset in case
             
-        # Update local config immediately for visual feedback
+        # Update local config immediately
         app = config.get('appearance', {})
         self._border_effect = app.get('border_effect', 'Rainbow')
+        self.overlay_manager.set_border_effect(self._border_effect)
+        
+        # Update custom colors
+        self._show_dimming = app.get('show_dimming', False)
+        self._glass_ui = app.get('glass_ui', False)
+        
         self._live_dimming = True
         
         # Propagate to buttons
         for btn in self.buttons:
             btn.set_border_effect(self._border_effect)
+            btn.show_dimming = self._show_dimming
+        
+        # Update display (handles height/width changes nicely)
+        if 'rows' in app and app['rows'] != self._rows:
+            self.set_rows(app['rows'])
+            
+        self.update_style()
         
         self.settings_saved.emit(config)
         self.hide_settings()
@@ -1476,12 +1845,55 @@ class Dashboard(QWidget):
         # The main app handles actual saving, we just bubble up
         # BUT we need to close the view
         self.transition_to('grid')
-        self.edit_button_saved.emit(config)
+        # Emit slot AND config
+        self.edit_button_saved.emit(self.edit_widget.slot, config)
         
     def _on_edit_cancelled(self):
         self.transition_to('grid')
+
+    def _on_edit_size_changed(self):
+        """Handle dynamic height changes from the Edit Widget (debounced to prevent jitter)."""
+        if getattr(self, '_current_view', '') != 'edit_button':
+            return
+            
+        # Debounce: cancel any pending resize and reschedule
+        if not hasattr(self, '_edit_resize_timer'):
+            self._edit_resize_timer = QTimer(self)
+            self._edit_resize_timer.setSingleShot(True)
+            self._edit_resize_timer.timeout.connect(self._do_edit_resize)
         
-    edit_button_saved = pyqtSignal(dict) # Signals back to main
+        self._edit_resize_timer.start(80)  # Wait 80ms before actually animating
+
+    def _do_edit_resize(self):
+        """Perform the actual edit dialog resize after debounce."""
+        if getattr(self, '_current_view', '') != 'edit_button':
+            return
+        
+        target_height = self._calculate_view_height('edit_button')
+        
+        if abs(target_height - self.height()) <= 2:
+            return
+        
+        # Stop any running animation first to prevent compounding
+        self._animation_timer.stop()
+        
+        # MUST unlock the constraints so it can animate smoothly
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        
+        self._anim_start_height = self.height()
+        self._anim_target_height = target_height
+        self._anim_start_time = time.perf_counter()
+        self._anim_duration = 0.18
+        
+        # Anchor exactly to the current bottom so sizing is perfectly stable,
+        # _on_transition_done will run when finished to reset the anchor precisely
+        self._anchor_bottom_y = self.geometry().y() + self.height()
+        
+        self._lock_view_sizes('edit_button', target_height)
+        self._animation_timer.start()
+        
+    # edit_button_saved = pyqtSignal(dict) # REMOVED: Defined at top of class with (int, dict)
     
     def show_edit_button(self, slot: int, config: dict = None, entities: list = None):
         """Open the embedded button editor."""
@@ -1533,7 +1945,14 @@ class Dashboard(QWidget):
                 content_h = self.edit_widget.get_content_height()
                 # Add small padding for container margins
                 h = content_h + 30
-                return max(300, min(h, 600))
+                
+                # Clamp against screen height so it doesn't grow taller than monitor
+                screen = QApplication.primaryScreen()
+                if screen:
+                    max_h = screen.availableGeometry().height() * 0.95
+                    h = min(h, int(max_h))
+                
+                return max(300, min(h, 2000))
             return 400
             
         # Default fallback for unknown views
@@ -1574,9 +1993,12 @@ class Dashboard(QWidget):
         # 2. Update view state
         self._current_view = view_name
         
-        # 3. Calculate heights
+        # 3. Calculate heights (Moved up so we can use it for capture)
         start_height = self.height()
         target_height = self._calculate_view_height(view_name)
+
+        # No longer re-capturing glass background here because capturing while visible
+        # will capture the dashboard UI itself. show_near_tray() captures the full column up front.
         
         # 4. Prepare Animation
         self._anim_start_height = start_height
@@ -1599,7 +2021,7 @@ class Dashboard(QWidget):
         else:
             # Returning to grid: restore opacity
             for btn in self.buttons:
-                btn.set_faded(1.0)
+                btn.set_opacity(1.0)
 
         # 7. Unlock Window Constraints
         self.setMinimumHeight(0)
@@ -1653,6 +2075,7 @@ class Dashboard(QWidget):
                 # Special handling for returning to grid
                 pass
             
+            # Lock the view to its final state (stops drift!)
             self._on_transition_done()
 
     def _fade_in_footer(self):
@@ -1710,6 +2133,17 @@ class Dashboard(QWidget):
                 
                 # After rebuild, reposition
                 self._reposition_after_morph()
+            
+            # FIX: Process pending col change if any (deferred from set_cols)
+            pending_cols = getattr(self, '_pending_cols', None)
+            if pending_cols is not None:
+                self._pending_cols = None
+                self._do_set_cols(pending_cols)
+                self._fade_in_footer()
+                self._reposition_after_morph()
+                return
+            
+            if pending is not None:
                 return
         
         # Re-lock the window to its final size
@@ -1730,11 +2164,170 @@ class Dashboard(QWidget):
     
     def _reposition_after_morph(self):
         """Reposition window to keep it anchored to bottom-right."""
-        screen = QApplication.primaryScreen()
+        try:
+            screen = self.screen()
+        except:
+            screen = QApplication.primaryScreen()
+            
+        if not screen:
+            screen = QApplication.primaryScreen()
+            
         if not screen:
             return
         screen_rect = screen.availableGeometry()
         x = screen_rect.right() - self.width() - 10
         y = screen_rect.bottom() - self.height() - 10
         self.move(x, y)
+
+    # ============ DRAG TO RESIZE HANDLERS ============
+    
+    def mousePressEvent(self, event):
+        """Handle window resize drag start."""
+        # Only allow resizing in Grid View
+        if self._current_view != 'grid':
+            super().mousePressEvent(event)
+            return
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            x = event.position().x()
+            y = event.position().y()
+            
+            # Identify resize zone
+            mode = None
+            # Disable Corner Drag (Top-Left) - Prioritize Top then Left
+            if y < RESIZE_MARGIN:
+                mode = 'top'
+            elif x < RESIZE_MARGIN:
+                mode = 'left'
+                
+            if mode:
+                self._is_resizing_window = True
+                self._resize_mode = mode
+                self._resize_start_pos = event.globalPosition().toPoint()
+                self._resize_start_geo = (self.x(), self.y(), self.width(), self.height())
+                self._resize_start_rows = self._rows
+                self._resize_start_cols = self._cols
+                event.accept()
+                return
+
+        super().mousePressEvent(event)
+
+    def leaveEvent(self, event):
+        """Reset cursor when mouse leaves window."""
+        # Only reset if not currently dragging
+        if not self._is_resizing_window:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        super().leaveEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """Handle resize drag and hover cursor."""
+        # Only allow resizing in Grid View
+        if self._current_view != 'grid':
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            super().mouseMoveEvent(event)
+            return
+
+        x = event.position().x()
+        y = event.position().y()
+        
+        if not self._is_resizing_window:
+            # Hover Logic: Change Cursor (No Corner)
+            if y < RESIZE_MARGIN:
+                self.setCursor(Qt.CursorShape.SizeVerCursor)
+            elif x < RESIZE_MARGIN:
+                self.setCursor(Qt.CursorShape.SizeHorCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            super().mouseMoveEvent(event)
+            return
+            
+        # Drag Logic
+        delta = event.globalPosition().toPoint() - self._resize_start_pos
+        dx = delta.x()
+        dy = delta.y()
+        
+        # Calculate Logic:
+        # Top Drag (dy < 0 -> Grow Up -> Height Increase)
+        # Left Drag (dx < 0 -> Grow Left -> Width Increase)
+        
+        target_rows = self._resize_start_rows
+        target_cols = self._resize_start_cols
+        
+        if 'top' in self._resize_mode:
+            # Current Height - dy (since dy is negative for Up drag)
+            # Actually: new_h = start_h - dy
+            start_h = self._resize_start_geo[3]
+            new_h = start_h - dy
+            target_rows = self._get_rows_at_height(new_h)
+            
+        if 'left' in self._resize_mode:
+            # new_w = start_w - dx
+            start_w = self._resize_start_geo[2]
+            new_w = start_w - dx
+            target_cols = self._get_cols_at_width(new_w)
+            
+        # Apply Changes (Snap)
+        current_rows = getattr(self, '_pending_rows_update', None)
+        if current_rows is None:
+            current_rows = self._rows
+            
+        if target_rows != current_rows:
+            self.set_rows(target_rows)
+            
+        if target_cols != self._cols:
+            self.set_cols(target_cols)
+            
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        """End resize drag."""
+        if self._is_resizing_window:
+            self._is_resizing_window = False
+            self._resize_mode = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            
+            # Prevent focus-loss close for a brief moment
+            # (In case mouse release happened outside window)
+            self._ignore_focus_loss = True
+            QTimer.singleShot(500, lambda: setattr(self, '_ignore_focus_loss', False))
+            
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _get_rows_at_height(self, target_h):
+        """Find nearest row count for a target window height."""
+        best_rows = self._rows
+        min_diff = float('inf')
+        
+        # Calculate height for 2 to 6 rows
+        for r in range(2, 7):
+            # Calculate grid height
+            grid_h = (r * BUTTON_HEIGHT) + ((r - 1) * BUTTON_SPACING)
+            # Match calculation from _do_set_rows:
+            # grid_h + GRID_MARGIN_TOP + GRID_MARGIN_BOTTOM + FOOTER_HEIGHT + FOOTER_MARGIN_BOTTOM + (2 * ROOT_MARGIN)
+            extras = GRID_MARGIN_TOP + GRID_MARGIN_BOTTOM + FOOTER_HEIGHT + FOOTER_MARGIN_BOTTOM + (2 * ROOT_MARGIN)
+            calc_h = grid_h + extras
+            
+            diff = abs(calc_h - target_h)
+            if diff < min_diff:
+                min_diff = diff
+                best_rows = r
+                
+        return best_rows
+
+    def _get_cols_at_width(self, target_w):
+        """Find nearest col count for a target window width."""
+        best_cols = self._cols
+        min_diff = float('inf')
+        
+        # 4 to 6 cols
+        for c in range(4, 9): 
+            calc_w = calculate_width(c)
+            diff = abs(calc_w - target_w)
+            if diff < min_diff:
+                min_diff = diff
+                best_cols = c
+                
+        return best_cols
 

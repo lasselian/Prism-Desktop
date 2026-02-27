@@ -10,10 +10,13 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QColor, QFont, QDrag, QPixmap, QPainter, QCursor,
     QPen, QBrush, QLinearGradient, QConicalGradient, QDesktopServices,
-    QIcon, QAction, QPainterPath
+    QIcon, QPainterPath
 )
-from ui.icons import get_icon, get_mdi_font, Icons
+from ui.icons import get_icon, get_mdi_font, Icons, get_icon_for_type
 from core.utils import SYSTEM_FONT
+from ui.widgets.dashboard_button_painter import DashboardButtonPainter
+from ui.widgets.dashboard_button_styles import DashboardButtonStyleManager
+import sys
 
 # Custom MIME type for drag and drop
 MIME_TYPE = "application/x-hatray-slot"
@@ -28,6 +31,11 @@ class DashboardButton(QFrame):
     clear_requested = pyqtSignal(int)
     dimmer_requested = pyqtSignal(int, QRect) # slot, geometry
     climate_requested = pyqtSignal(int, QRect) # slot, geometry
+    weather_requested = pyqtSignal(int, QRect) # slot, geometry
+    printer_requested = pyqtSignal(int, QRect, dict) # slot, geometry, config
+    volume_requested = pyqtSignal(int, QRect) # slot, geometry (for volume overlay)
+    volume_scroll = pyqtSignal(str, float) # entity_id, new_volume (for scroll wheel)
+    media_command_requested = pyqtSignal(dict)
     resize_requested = pyqtSignal(int, int, int) # slot, span_x, span_y
     resize_finished = pyqtSignal()
     
@@ -40,8 +48,16 @@ class DashboardButton(QFrame):
         self.span_y = self.config.get('span_y', 1)
         
         self.theme_manager = theme_manager
+        self._show_border_effect = False
+        self._show_dimming = False
+        self._brightness = 255
+        
+        # Internal state
         self._state = "off"
-        self._value = ""
+        self._value = None
+        self._ha_icon = None  # Icon from Home Assistant state
+        self._media_state = {}  # Full media player state
+        self._album_art = None  # QPixmap for album art
         self._drag_start_pos = None
         self._is_resizing = False
         self._resize_start_span = (1, 1)
@@ -73,6 +89,10 @@ class DashboardButton(QFrame):
         self.pulse_anim.setKeyValueAt(0.5, 0.8)
         self.pulse_anim.setKeyValueAt(1, 0.0)
         
+        # Bounce animation on click
+        self._bounce_offset = 0.0
+        self.bounce_anim = QPropertyAnimation(self, b"bounce_offset")
+        
         # Long press timer
         self._long_press_timer = QTimer(self)
         self._long_press_timer.setSingleShot(True)
@@ -84,8 +104,8 @@ class DashboardButton(QFrame):
         self.setup_ui()
         self.update_style()
         
-        # Enable dropping
-        self.setAcceptDrops(True)
+        # Disable dropping (handled by parent Dashboard)
+        self.setAcceptDrops(False)
         # Context menu
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self.show_context_menu)
@@ -110,6 +130,10 @@ class DashboardButton(QFrame):
         else:
             self._opacity_eff.setEnabled(True)
             self._opacity_eff.setOpacity(opacity)
+            
+    def set_opacity(self, opacity: float):
+        """Standard public method for setting overall button opacity."""
+        self.set_faded(opacity)
         
     def get_anim_progress(self):
         return self._anim_progress
@@ -138,6 +162,26 @@ class DashboardButton(QFrame):
         
     resize_handle_opacity = pyqtProperty(float, get_resize_handle_opacity, set_resize_handle_opacity)
     
+    def get_bounce_offset(self):
+        return self._bounce_offset
+
+    def set_bounce_offset(self, val):
+        self._bounce_offset = val
+        m = 8
+        self.layout().setContentsMargins(m, m + int(val), m, m - int(val))
+
+    bounce_offset = pyqtProperty(float, get_bounce_offset, set_bounce_offset)
+    
+    def get_show_dimming(self):
+        return self._show_dimming
+
+    def set_show_dimming(self, val):
+        if self._show_dimming != val:
+            self._show_dimming = val
+            self.update_style()
+
+    show_dimming = pyqtProperty(bool, get_show_dimming, set_show_dimming)
+
     def set_spans(self, x, y):
         """Update spans and resize widget."""
         self.span_x = x
@@ -187,12 +231,25 @@ class DashboardButton(QFrame):
         name_font = QFont(SYSTEM_FONT, 9)
         self.name_label.setFont(name_font)
         
+        # Add drop shadows for readability on colored backgrounds
+        shadow_val = QGraphicsDropShadowEffect()
+        shadow_val.setBlurRadius(4)
+        shadow_val.setColor(QColor(0, 0, 0, 140))
+        shadow_val.setOffset(0, 1)
+        self.value_label.setGraphicsEffect(shadow_val)
+        
+        shadow_name = QGraphicsDropShadowEffect()
+        shadow_name.setBlurRadius(4)
+        shadow_name.setColor(QColor(0, 0, 0, 140))
+        shadow_name.setOffset(0, 1)
+        self.name_label.setGraphicsEffect(shadow_name)
+        
         layout.addStretch()
         layout.addWidget(self.value_label)
         layout.addWidget(self.name_label)
         layout.addStretch()
         
-        # self.setFixedSize(90, 80) # Removed fixed size
+
         self.setFixedSize(90 * self.span_x + (8 * (self.span_x - 1)), 80 * self.span_y + (8 * (self.span_y - 1)))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         
@@ -200,199 +257,266 @@ class DashboardButton(QFrame):
     
     def update_content(self):
         """Update button content from config."""
-        
         if not self.config:
-            # Empty slot - show plus icon
-            self.value_label.setFont(get_mdi_font(24))
-            self.value_label.setText(Icons.PLUS)
-            self.name_label.setText("Add")
-            self.value_label.show()
-            self.name_label.show()
-            self.value_label.show()
-            self.name_label.show()
-            # Clear camera image
-            self._cached_display_pixmap = None
-            self.update()
+            self._update_empty_view()
+            return
+        
+        # Forbidden slot
+        if self.config.get('type') == 'forbidden':
+            self._update_forbidden_view()
             return
         
         btn_type = self.config.get('type', 'switch')
-        label = self.config.get('label', '')
-        custom_icon = self.config.get('icon')
         
-        icon_char = get_icon(custom_icon) if custom_icon else None
-
+        # Dispatch to specific view updaters
         if btn_type == 'weather':
-            # Weather Widget Logic
-            state_obj = self._value if isinstance(self._value, dict) else {}
-            state_str = state_obj.get('state', 'unknown')
-            attrs = state_obj.get('attributes', {})
-            
-            # Data extraction
-            temp = attrs.get('temperature', '--')
-            unit = attrs.get('temperature_unit', '°C') # HA usually provides this in attributes or unit_of_measurement
-            # fallback to global unit if not in attrs? usually in attrs for weather entity
-            
-            # Map Emoji
-            emoji = self._get_weather_emoji(state_str)
-            
-            # Layout based on size
-            is_huge = self.span_x >= 2 and self.span_y >= 2
-            is_wide = self.span_x >= 2
-            is_tall = self.span_y >= 2
-            
-            if is_huge:
-                # 2x2+: Detailed View
-                humidity = attrs.get('humidity', '--')
-                wind = attrs.get('wind_speed', '--')
-                
-                # Multiline text with HTML for styling
-                text = (
-                    f"<div style='font-size: 22px; font-weight: 300; margin-bottom: 4px;'>{emoji} {temp}°</div>"
-                    f"<div style='font-size: 11px; color: #aaaaaa; font-weight: 600;'>Humidity: {humidity}%</div>"
-                    f"<div style='font-size: 11px; color: #aaaaaa; font-weight: 600;'>Wind: {wind} km/h</div>"
-                )
-                self.value_label.setTextFormat(Qt.TextFormat.RichText)
-                self.value_label.setText(text)
-                # Font size set in HTML, but keep base font for metrics
-                self.value_label.setFont(QFont(SYSTEM_FONT, 12)) 
-                
-            elif is_tall and not is_wide:
-                # 1x2 (Tall): Stacked
-                self.value_label.setText(f"{emoji}\n{temp}°")
-                self.value_label.setFont(QFont(SYSTEM_FONT, 24))
-                
-            elif is_wide:
-                # 2x1 (Wide): Side by side
-                self.value_label.setTextFormat(Qt.TextFormat.PlainText)
-                self.value_label.setText(f"{emoji} {temp}°")
-                self.value_label.setFont(QFont(SYSTEM_FONT, 28))
-                
-            else:
-                # 1x1: Temp Only (Compact)
-                self.value_label.setTextFormat(Qt.TextFormat.PlainText)
-                self.value_label.setText(f"{temp}°")
-                self.value_label.setFont(QFont(SYSTEM_FONT, 22, QFont.Weight.Bold))
-            
-            if label:
-                self.name_label.setText(label)
-                self.name_label.show()
-            else:
-                self.name_label.hide()
-                
-            self.setProperty("type", "weather")
-            self.value_label.show()
-
+            self._update_weather_view()
         elif btn_type == 'widget':
-            # Show sensor value (no icon font, regular font)
-            self.value_label.setFont(QFont(SYSTEM_FONT, 16, QFont.Weight.Bold))
-            
-            val = self._value
-            if val is not None:
-                # Precision Formatting (Default to 1 if not set)
-                precision = self.config.get('precision', 1)
-                
-                try:
-                    import re
-                    # Extract number and unit (e.g., "21.5" and "°C")
-                    match = re.match(r"([+-]?\d*\.?\d+)(.*)", str(val))
-                    if match:
-                        num_str, unit_str = match.groups()
-                        f_val = float(num_str)
-                        
-                        if precision == 0:
-                            formatted_num = f"{f_val:.0f}"
-                        else:
-                            formatted_num = f"{f_val:.{precision}f}"
-                            
-                        val = f"{formatted_num}{unit_str}"
-                except (ValueError, TypeError):
-                    pass # Keep original string if parsing fails
-                        
-            self.value_label.setText(val or "--")
-            self.name_label.setText(label)
-            self.setProperty("type", "widget")
-            self.value_label.show()
-            self.name_label.show()
+            self._update_widget_view()
         elif btn_type == 'climate':
-            # Show temperature value
-            self.value_label.setFont(QFont(SYSTEM_FONT, 16, QFont.Weight.Bold))
-            self.value_label.setText(self._value or "--°C")
-            self.name_label.setText(label)
-            self.setProperty("type", "climate")
-            self.value_label.show()
-            self.name_label.show()
+            self._update_climate_view()
         elif btn_type == 'curtain':
-            # Show curtain icon (MDI blinds)
-            self.value_label.setFont(get_mdi_font(26))
-            if icon_char:
-                icon = icon_char
-            else:
-                icon = Icons.BLINDS_OPEN if self._state == "open" else Icons.BLINDS
-            self.value_label.setText(icon)
-            self.name_label.setText(label)
-            self.setProperty("type", "curtain")
-            self.value_label.show()
-            self.name_label.show()
+            self._update_curtain_view()
         elif btn_type == 'script':
-            # Show script icon
-            self.value_label.setFont(get_mdi_font(26))
-            self.value_label.setText(icon_char if icon_char else Icons.SCRIPT)
-            self.name_label.setText(label)
-            self.name_label.setText(label)
-            self.setProperty("type", "script")
-            self.value_label.show()
-            self.name_label.show()
+            self._update_script_view()
+        elif btn_type == 'automation':
+            self._update_automation_view()
         elif btn_type == 'scene':
-            # Show scene icon
-            self.value_label.setFont(get_mdi_font(26))
-            # Use specific default if no icon configured, otherwise use resolved icon
-            default_icon = Icons.SCENE_THEME
-            self.value_label.setText(get_icon(custom_icon) if custom_icon else default_icon)
-            self.name_label.setText(label)
-            self.setProperty("type", "scene")
-            self.value_label.show()
-            self.name_label.show()
-            self.setProperty("type", "scene")
-            self.value_label.show()
-            self.name_label.show()
+            self._update_scene_view()
         elif btn_type == 'fan':
-            # Fan (Switch-like)
-            self.value_label.setFont(get_mdi_font(26))
-            if icon_char:
-                icon = icon_char
-            else:
-                icon = Icons.FAN
-            self.value_label.setText(icon)
-            self.name_label.setText(label)
-            self.setProperty("type", "fan")
-            self.value_label.show()
-            self.name_label.show()
+            self._update_fan_view()
+        elif btn_type == 'media_player':
+            self._update_media_player_view()
         elif btn_type == 'camera':
-            # Camera shows image, hide text labels
-            self.value_label.hide()
-            self.name_label.hide()
-            self.setProperty("type", "camera")
-            
-            # Set placeholder if no image yet
-            if not self._cached_display_pixmap or self._cached_display_pixmap.isNull():
-                self.value_label.show()
-                self.value_label.setFont(get_mdi_font(26))
-                self.value_label.setText(Icons.VIDEO)
+            self._update_camera_view()
+        elif btn_type == '3d_printer':
+            self._update_3d_printer_view()
         else:
-            # Show switch/light icon (MDI lightbulb)
-            self.value_label.setFont(get_mdi_font(26))
-            if icon_char:
-                icon = icon_char
-            else:
-                icon = Icons.LIGHTBULB if self._state == "on" else Icons.LIGHTBULB_OFF
-            self.value_label.setText(icon)
-            self.name_label.setText(label)
-            self.setProperty("type", "switch")
-            self.value_label.show()
-            self.name_label.show()
+            self._update_default_view(btn_type)
             
         self.style().unpolish(self)
         self.style().polish(self)
+
+    # --- View Helpers ---
+
+    def _update_empty_view(self):
+        """Show add button."""
+        self.value_label.setFont(get_mdi_font(24))
+        self.value_label.setText(Icons.PLUS)
+        self.name_label.setText("Add")
+        self.value_label.show()
+        self.name_label.show()
+        self._cached_display_pixmap = None
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update()
+
+    def _update_forbidden_view(self):
+        """Show forbidden icon."""
+        self.value_label.setFont(get_mdi_font(22))
+        self.value_label.setText(get_icon("block-helper"))
+        self.name_label.hide()
+        self.value_label.show()
+        self._cached_display_pixmap = None
+        self.setCursor(Qt.CursorShape.ForbiddenCursor)
+        self.update()
+
+    def _update_weather_view(self):
+        """Update weather widget content."""
+        label = self.config.get('label', '')
+        state_obj = self._value if isinstance(self._value, dict) else {}
+        state_str = state_obj.get('state', 'unknown')
+        attrs = state_obj.get('attributes', {})
+        
+        temp = attrs.get('temperature', '--')
+        emoji = self._get_weather_emoji(state_str)
+        
+        is_huge = self.span_x >= 2 and self.span_y >= 2
+        is_wide = self.span_x >= 2
+        is_tall = self.span_y >= 2
+        
+        # On Linux, we use MDI icons which need to be in a specific font family
+        # We wrap them in a span with the correct font family
+        is_linux = sys.platform.startswith('linux')
+        
+        if is_huge:
+            humidity = attrs.get('humidity', '--')
+            wind = attrs.get('wind_speed', '--')
+            try:
+                wind_ms = round(float(wind) / 3.6, 1)
+                wind_display = f"{wind_ms} m/s"
+            except (ValueError, TypeError):
+                wind_display = f"{wind} m/s"
+
+            # Use different font size/styling for MDI vs Emoji
+            mdi_family = get_mdi_font().family()
+            emoji_html = f"<span style='font-family: \"{mdi_family}\"; font-size: 40px;'>{emoji}</span>" if is_linux else f"{emoji}"
+
+            text = (
+                f"<div style='font-size: 22px; font-weight: 300; margin-bottom: 4px;'>{emoji_html} {temp}°</div>"
+                f"<div style='font-size: 11px; color: #aaaaaa; font-weight: 600;'>Humidity: {humidity}%</div>"
+                f"<div style='font-size: 11px; color: #aaaaaa; font-weight: 600;'>Wind: {wind_display}</div>"
+            )
+            self.value_label.setTextFormat(Qt.TextFormat.RichText)
+            self.value_label.setText(text)
+            self.value_label.setFont(QFont(SYSTEM_FONT, 12)) 
+        elif is_tall and not is_wide:
+            self.value_label.setTextFormat(Qt.TextFormat.RichText if is_linux else Qt.TextFormat.PlainText)
+            if is_linux:
+                mdi_family = get_mdi_font().family()
+                emoji_html = f"<div style='font-family: \"{mdi_family}\"; font-size: 40px; margin-bottom: 5px;'>{emoji}</div>"
+                self.value_label.setText(f"{emoji_html}{temp}°")
+            else:
+                self.value_label.setText(f"{emoji}\n{temp}°")
+            self.value_label.setFont(QFont(SYSTEM_FONT, 24))
+        elif is_wide:
+            self.value_label.setTextFormat(Qt.TextFormat.RichText if is_linux else Qt.TextFormat.PlainText)
+            if is_linux:
+                mdi_family = get_mdi_font().family()
+                emoji_html = f"<span style='font-family: \"{mdi_family}\"; font-size: 32px;'>{emoji}</span>"
+                self.value_label.setText(f"{emoji_html} {temp}°")
+            else:
+                self.value_label.setText(f"{emoji} {temp}°")
+            self.value_label.setFont(QFont(SYSTEM_FONT, 28))
+        else:
+            self.value_label.setTextFormat(Qt.TextFormat.PlainText)
+            # Small buttons: just temp, maybe no icon? existing logic shows temp only
+            self.value_label.setText(f"{temp}°")
+            self.value_label.setFont(QFont(SYSTEM_FONT, 22, QFont.Weight.Bold))
+        
+        if label:
+            self.name_label.setText(label)
+            self.name_label.show()
+        else:
+            self.name_label.hide()
+            
+        self.setProperty("type", "weather")
+        self.value_label.show()
+
+    def _update_widget_view(self):
+        """Update generic sensor widget."""
+        label = self.config.get('label', '')
+        self.value_label.setFont(QFont(SYSTEM_FONT, 16, QFont.Weight.Bold))
+        
+        val = self._value
+        if val is not None:
+            precision = self.config.get('precision', 1)
+            try:
+                import re
+                match = re.match(r"([+-]?\d*\.?\d+)(.*)", str(val))
+                if match:
+                    num_str, unit_str = match.groups()
+                    f_val = float(num_str)
+                    if precision == 0:
+                        formatted_num = f"{f_val:.0f}"
+                    else:
+                        formatted_num = f"{f_val:.{precision}f}"
+                    val = f"{formatted_num}{unit_str}"
+            except (ValueError, TypeError):
+                pass
+                    
+        self.value_label.setText(val or "--")
+        self.name_label.setText(label)
+        self.setProperty("type", "widget")
+        self.value_label.show()
+        self.name_label.show()
+
+    def _update_climate_view(self):
+        label = self.config.get('label', '')
+        self.value_label.setFont(QFont(SYSTEM_FONT, 16, QFont.Weight.Bold))
+        self.value_label.setText(self._value or "--°C")
+        self.name_label.setText(label)
+        self.setProperty("type", "climate")
+        self.value_label.show()
+        self.name_label.show()
+
+    def _update_curtain_view(self):
+        label = self.config.get('label', '')
+        self.value_label.setFont(get_mdi_font(26))
+        
+        icon_name = self.config.get('icon') or self._ha_icon
+        icon_char = get_icon(icon_name) if icon_name else None
+        
+        if icon_char:
+            icon = icon_char
+        else:
+            icon = Icons.BLINDS_OPEN if self._state == "open" else Icons.BLINDS
+            
+        self.value_label.setText(icon)
+        self.name_label.setText(label)
+        self.setProperty("type", "curtain")
+        self.value_label.show()
+        self.name_label.show()
+
+    def _update_script_view(self):
+        self._update_simple_icon_view(Icons.SCRIPT, "script")
+
+    def _update_automation_view(self):
+        self._update_simple_icon_view(Icons.AUTOMATION, "automation")
+
+    def _update_scene_view(self):
+        self._update_simple_icon_view(Icons.SCENE_THEME, "scene")
+
+    def _update_fan_view(self):
+         self._update_simple_icon_view(Icons.FAN, "fan")
+
+    def _update_simple_icon_view(self, default_icon, type_name):
+        """Helper for simple icon+label buttons."""
+        label = self.config.get('label', '')
+        self.value_label.setFont(get_mdi_font(26))
+        
+        icon_name = self.config.get('icon') or self._ha_icon
+        icon_char = get_icon(icon_name) if icon_name else None
+        
+        self.value_label.setText(icon_char if icon_char else default_icon)
+        self.name_label.setText(label)
+        self.setProperty("type", type_name)
+        self.value_label.show()
+        self.name_label.show()
+
+    def _update_media_player_view(self):
+        self.value_label.hide()
+        self.name_label.hide()
+        self.setProperty("type", "media_player")
+        self.update()
+
+    def _update_camera_view(self):
+        self.value_label.hide()
+        self.name_label.hide()
+        self.setProperty("type", "camera")
+        
+        if not self._cached_display_pixmap or self._cached_display_pixmap.isNull():
+            self.value_label.show()
+            self.value_label.setFont(get_mdi_font(26))
+            self.value_label.setText(Icons.VIDEO)
+
+    def _update_3d_printer_view(self):
+        self.value_label.hide()
+        self.name_label.hide()
+        self.setProperty("type", "3d_printer")
+        self.update()
+        if not self._cached_display_pixmap or self._cached_display_pixmap.isNull():
+            self.value_label.show()
+            self.value_label.setFont(get_mdi_font(26))
+            self.value_label.setText(Icons.VIDEO)
+
+    def _update_default_view(self, btn_type):
+        """Default view for switch, light, lock, etc."""
+        label = self.config.get('label', '')
+        self.value_label.setFont(get_mdi_font(26))
+        
+        icon_name = self.config.get('icon') or self._ha_icon
+        icon_char = get_icon(icon_name) if icon_name else None
+        
+        if icon_char:
+            icon = icon_char
+        else:
+            icon = get_icon_for_type(btn_type, self._state)
+            
+        self.value_label.setText(icon)
+        self.name_label.setText(label)
+        self.setProperty("type", btn_type) 
+        self.value_label.show()
+        self.name_label.show()
     
     def set_state(self, state: str):
         """Set the state (on/off) for switches."""
@@ -400,38 +524,186 @@ class DashboardButton(QFrame):
         self.update_content()
         self.update_style()
     
-    def set_value(self, value: str):
-        """Set the value for sensor widgets."""
-        self._value = value
-        self.update_content()
+    def set_value(self, value):
+        """Update button value (sensor reading, etc)."""
+        if self._value != value:
+            self._value = value
+            self.update_content()
 
-    def set_weather_state(self, state: dict):
+    def set_ha_icon(self, icon_name: str):
+        """Update the icon from Home Assistant state."""
+        if self._ha_icon != icon_name:
+            self._ha_icon = icon_name
+            # Only update content if we are NOT using a custom icon
+            if not self.config.get('icon'):
+                self.update_content()
+    
+    def set_media_state(self, state: dict):
+        """Set the full media player state."""
+        self._media_state = state
+        self._state = state.get('state', 'idle')
+        
+
+        
+        # Update tooltip
+        attrs = state.get('attributes', {})
+        title = attrs.get('media_title', '')
+        artist = attrs.get('media_artist', '')
+        if title and artist:
+            self.setToolTip(f"Now Playing: {artist} \u2014 {title}")
+        elif title:
+            self.setToolTip(f"Now Playing: {title}")
+        else:
+            self.setToolTip('')
+        
+        self.update_content()
+        self.update_style()
+        self.update()  # Trigger repaint for custom painting
+
+    def set_album_art(self, pixmap):
+        """Set the album art pixmap."""
+        self._album_art = pixmap
+        self.update()  # Trigger repaint
+
+    def set_camera_image(self, pixmap):
+        """Set the camera image pixmap."""
+        self._last_camera_pixmap = pixmap
+        # If we are currently in camera mode, force update
+        if self.config.get('type') == 'camera':
+             self.update()
+
+    def reset_state(self):
+        """Reset internal state to default."""
+        self._state = "off"
+        self._value = None
+        self._brightness = 255
+        self._ha_icon = None
+        self._media_state = {}
+        self._album_art = None
+        self._last_camera_pixmap = None
+        
+        # Stop animations and reset counters
+        self.anim.stop()
+        self._anim_progress = 0.0
+        
+        self.pulse_anim.stop()
+        self._pulse_opacity = 0.0
+        
+        self.resize_anim.stop()
+        self._resize_handle_opacity = 0.0
+        
+        self.bounce_anim.stop()
+        self.set_bounce_offset(0.0)
+        
+        self.update_content()
+        self.update_style()
+
+    def apply_ha_state(self, state: dict):
+        """Apply Home Assistant state to the button."""
+        if not state:
+            return
+
+        attributes = state.get('attributes', {})
+        btn_type = self.config.get('type', 'switch')
+        
+        # Pass HA icon to button (if available)
+        icon = attributes.get('icon')
+        if icon:
+            self.set_ha_icon(icon)
+        
+        if btn_type == 'widget':
+            # Update sensor value
+            value = state.get('state', '--')
+            unit = attributes.get('unit_of_measurement', '')
+            self.set_value(f"{value}{unit}")
+        elif btn_type == 'climate':
+            # Update climate target temperature
+            temp = attributes.get('temperature', '--')
+            if temp != '--':
+                self.set_value(f"{temp}°C")
+            else:
+                self.set_value("--°C")
+            # Also update state for styling
+            hvac_action = state.get('state', 'off')
+            self.set_state('on' if hvac_action not in ['off', 'unavailable'] else 'off')
+        elif btn_type == 'curtain':
+            # Update curtain state (open/closed/opening/closing)
+            cover_state = state.get('state', 'closed')
+            # "open" when cover is up/open, anything else is closed
+            self.set_state('open' if cover_state == 'open' else 'closed')
+        elif btn_type == 'weather':
+            # Update weather state - pass full object for attributes
+            self.set_weather_state(state)
+        elif btn_type == 'media_player':
+            # Media player gets full state
+            self.set_media_state(state)
+        elif btn_type == '3d_printer':
+            # State entity logic (e.g. Printing, Paused)
+            self.set_state(state.get('state', 'unknown'))
+            # Let the painter pull the rest from the dashboard's _entity_states directly
+        elif btn_type == 'automation':
+            # Update automation state (on/off)
+            self.set_state(state.get('state', 'off'))
+        else:
+            # Update switch/light/fan/script/scene/lock state
+            self.set_state(state.get('state', 'off'))
+            
+            # Capture brightness for dimming effect
+            self._brightness = attributes.get('brightness', 255)
+            # Re-apply style if dimming enabled and brightness changed
+            if self._show_dimming:
+                self.update_style()
+
+    def set_weather_state(self, state_obj: dict):
         """Set full weather state object."""
-        self._value = state
+        self._value = state_obj
         self.update_content()
         self.update_style()
 
     def _get_weather_emoji(self, state: str) -> str:
-        """Map HA weather state to emoji."""
-        # Simple mapping
-        mapping = {
-            'clear-night': '🌙',
-            'cloudy': '☁️',
-            'fog': '🌫️',
-            'hail': '🌨️',
-            'lightning': '🌩️',
-            'lightning-rainy': '⛈️',
-            'partlycloudy': '⛅',
-            'pouring': '🌧️',
-            'rainy': '🌧️',
-            'snowy': '❄️',
-            'snowy-rainy': '🌨️',
-            'sunny': '☀️',
-            'windy': '💨',
-            'windy-variant': '🌬️',
-            'exceptional': '⚠️'
-        }
-        return mapping.get(state, 'Unknown')
+        """Map HA weather state to emoji (or MDI icon on Linux)."""
+        is_linux = sys.platform.startswith('linux')
+        
+        if is_linux:
+            # Map to MDI icons
+            mapping = {
+                'clear-night': Icons.WEATHER_NIGHT,
+                'cloudy': Icons.WEATHER_CLOUDY,
+                'fog': Icons.WEATHER_FOG,
+                'hail': Icons.WEATHER_HAIL,
+                'lightning': Icons.WEATHER_LIGHTNING,
+                'lightning-rainy': Icons.WEATHER_LIGHTNING_RAINY,
+                'partlycloudy': Icons.WEATHER_PARTLY_CLOUDY,
+                'pouring': Icons.WEATHER_POURING,
+                'rainy': Icons.WEATHER_RAINY,
+                'snowy': Icons.WEATHER_SNOWY,
+                'snowy-rainy': Icons.WEATHER_SNOWY_RAINY,
+                'sunny': Icons.WEATHER_SUNNY,
+                'windy': Icons.WEATHER_WINDY,
+                'windy-variant': Icons.WEATHER_WINDY_VARIANT,
+                'exceptional': Icons.ALERT_CIRCLE
+            }
+            return mapping.get(state, Icons.WEATHER_CLOUDY) # Default to cloudy/unknown
+        else:
+            # Simple mapping
+            mapping = {
+                'clear-night': '🌙',
+                'cloudy': '☁️',
+                'fog': '🌫️',
+                'hail': '🌨️',
+                'lightning': '🌩️',
+                'lightning-rainy': '⛈️',
+                'partlycloudy': '⛅',
+                'pouring': '🌧️',
+                'rainy': '🌧️',
+                'snowy': '❄️',
+                'snowy-rainy': '🌨️',
+                'sunny': '☀️',
+                'windy': '💨',
+                'windy-variant': '🌬️',
+                'exceptional': '⚠️'
+            }
+            return mapping.get(state, 'Unknown')
     
     def set_camera_image(self, pixmap):
         """Set camera image from QPixmap."""
@@ -447,7 +719,6 @@ class DashboardButton(QFrame):
             
         # 1. Cache Path (Avoid QPainterPath recreation)
         if not hasattr(self, '_cached_path') or getattr(self, '_cached_path_size', None) != btn_size:
-            from PyQt6.QtGui import QPainterPath
             self._cached_path = QPainterPath()
             self._cached_path.addRoundedRect(QRectF(0, 0, btn_size.width(), btn_size.height()), 12, 12)
             self._cached_path_size = btn_size
@@ -496,298 +767,32 @@ class DashboardButton(QFrame):
     
     def update_style(self):
         """Update visual style based on state and theme."""
-        if self.theme_manager:
-            colors = self.theme_manager.get_colors()
-        else:
-            colors = {
-                'base': '#2d2d2d',
-                'accent': '#0078d4',
-                'text': '#ffffff',
-                'border': '#555555',
-                'alternate_base': '#353535',
-                'text': '#e0e0e0', # High contrast text
-                'border': '#555555',
-                'alternate_base': '#353535',
-                'subtext': '#888888', # For units/secondary info
-            }
-        
-        # Use cleaner, Apple-style typography
-        # Main Value: Large, Thin/Light
-        # Label: Small, Uppercase, Tracking
-        
-        font_main = SYSTEM_FONT
-        font_weight_val = "300" # Light
-        font_size_val = "20px" # Increased from 18px
-        
-        font_label = SYSTEM_FONT 
-        font_size_label = "11px" # Increased from 10px
-        font_weight_label = "600" # Semi-Bold
-
-        if not self.config:
-            # Empty
-            self.setStyleSheet(f"""
-                DashboardButton {{
-                    background-color: {colors['alternate_base']};
-                    border-radius: 10px;
-                }}
-                QLabel {{ color: {colors['border']}; background: transparent; }}
-            """)
-        elif self._state == "on" or self._state == "open":
-             # On - Use button's custom color if set, otherwise theme accent
-             button_color = self.config.get('color', colors['accent'])
-             
-             # Icons: Lower opacity = Stronger Tint (background bleeds through)
-             icon_color = "rgba(255, 255, 255, 0.65)"
-             # Text: Pure White (Crisp)
-             text_color = "rgba(255, 255, 255, 1.0)"
-             
-             self.setStyleSheet(f"""
-                DashboardButton {{
-                    background-color: {button_color};
-                    border-radius: 12px;
-                }}
-                QLabel#valueLabel {{ 
-                    color: {icon_color}; 
-                    background: transparent; 
-                    font-family: "{font_main}"; font-size: {font_size_val}; font-weight: {font_weight_val};
-                }}
-                /* Beefier font for Icons (Switch/Light/Script) */
-                DashboardButton[type="switch"] QLabel#valueLabel,
-                DashboardButton[type="script"] QLabel#valueLabel,
-                DashboardButton[type="scene"] QLabel#valueLabel,
-                DashboardButton[type="fan"] QLabel#valueLabel {{
-                     color: {icon_color};
-                     font-weight: 400; 
-                     font-size: 26px; /* Significantly larger icon */
-                }}
-                /* Climate shows temperature - keep it readable like text */
-                DashboardButton[type="climate"] QLabel#valueLabel {{
-                     color: {text_color};
-                     font-weight: 400; 
-                     font-size: 20px;
-                }}
-                /* Curtain uses icon */
-                DashboardButton[type="curtain"] QLabel#valueLabel {{
-                     color: {icon_color};
-                     font-weight: 400; 
-                     font-size: 26px; 
-                }}
-                /* Weather style handled dynamically in code but defaults here */
-                DashboardButton[type="weather"] QLabel#valueLabel {{
-                     color: {text_color};
-                     font-weight: 400;
-                     /* flow: multiline */
-                }}
-                QLabel#nameLabel {{ 
-                    color: {text_color}; 
-                    background: transparent;
-                    opacity: 0.9;
-                    font-family: "{font_label}"; font-size: {font_size_label}; font-weight: {font_weight_label}; text-transform: uppercase;
-                }}
-            """)
-        else:
-            # Off / Widget (Default dark state)
-            self.setStyleSheet(f"""
-                DashboardButton {{
-                    background-color: {colors['base']};
-                    border-radius: 12px;
-                }}
-                DashboardButton:hover {{
-                    background-color: {colors['alternate_base']};
-                }}
-                QLabel#valueLabel {{ 
-                    color: {colors['text']}; 
-                    background: transparent;
-                    font-family: "{font_main}"; font-size: {font_size_val}; font-weight: {font_weight_val};
-                }}
-                DashboardButton[type="switch"] QLabel#valueLabel,
-                DashboardButton[type="script"] QLabel#valueLabel,
-                DashboardButton[type="scene"] QLabel#valueLabel,
-                DashboardButton[type="fan"] QLabel#valueLabel {{
-                     font-weight: 400; 
-                     font-size: 26px; /* Significantly larger icon */
-                }}
-                DashboardButton[type="climate"] QLabel#valueLabel {{
-                     font-weight: 400; 
-                     font-size: 20px;
-                }}
-                DashboardButton[type="weather"] QLabel#valueLabel {{
-                     font-weight: 400;
-                }}
-                QLabel#nameLabel {{ 
-                    color: {colors.get('subtext', '#888888')}; 
-                    background: transparent;
-                    font-family: "{font_label}"; font-size: {font_size_label}; font-weight: {font_weight_label}; text-transform: uppercase;
-                }}
-            """)
+        DashboardButtonStyleManager.apply_style(self)
     
     def paintEvent(self, event):
         """Custom paint event for effects."""
         # First draw normal style (background)
-        # First draw normal style (background)
         super().paintEvent(event)
         
-        # Draw Camera Image (if applicable)
-        if self.config and self.config.get('type') == 'camera' and self._cached_display_pixmap:
-             painter = QPainter(self)
-             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-             painter.drawPixmap(0, 0, self._cached_display_pixmap)
-        
-        # Pulse Animation (Script)
-        if self._pulse_opacity > 0.01:
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
-            # Use custom color or accent
-            c = QColor("#0078d4")
-            if self.theme_manager:
-                c = QColor(self.theme_manager.get_colors()['accent'])
-            
-            # Allow custom color override
-            if self.config and 'color' in self.config:
-                c = QColor(self.config['color'])
-                
-            c.setAlphaF(self._pulse_opacity)
-            
-            # Draw rounded rect overlay
-            painter.setBrush(QBrush(c))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawRoundedRect(QRectF(self.rect()), 12, 12)
-        
-        # Only draw special border if animating
-        if self.anim.state() == QPropertyAnimation.State.Running:
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
-            # Interactive 'Press' feedback
-            angle = self._anim_progress * 360.0 * 1.5
-            
-            opacity = 1.0
-            if self._anim_progress > 0.8:
-                opacity = (1.0 - self._anim_progress) / 0.2
-            
-            painter.setOpacity(opacity)
-            rect = self.rect().adjusted(1, 1, -1, -1)
-            
-            if self._border_effect == 'Rainbow':
-                self._draw_rainbow_border(painter, rect, opacity, angle)
-            elif self._border_effect == 'Aurora Borealis':
-                self._draw_aurora_border(painter, rect, opacity, angle)
-
-        elif not self.config:
-            # Dashed border for empty slots (drawn over stylesheet bg)
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            rect = self.rect().adjusted(1, 1, -1, -1)
-            
-            if not hasattr(self, '_dashed_pen'):
-                self._dashed_pen = QPen(QColor("#555555")) 
-                self._dashed_pen.setStyle(Qt.PenStyle.DashLine)
-                self._dashed_pen.setWidth(2)
-                
-            painter.setPen(self._dashed_pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.setPen(self._dashed_pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(rect, 10, 10)
-
-
-        # Draw Resize Handle (Glass-like)
-        if self._resize_handle_opacity > 0.01:
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            
-            # Opacity control
-            painter.setOpacity(self._resize_handle_opacity)
-            
-            # Bottom-right corner
-            r = self.rect()
-            radius = 12 # Match button border radius
-            handle_size = 28 # Bigger handle
-            
-            path = QPainterPath()
-            
-            # 1. Start on bottom edge, left of corner
-            path.moveTo(r.right() - handle_size, r.bottom())
-            
-            # 2. Outer Edge: Follow the button's rounded corner exactly
-            # We want the bottom-right arc of the rounded rect
-            # rect for the arc is the 2*radius square at the corner
-            corner_rect = QRectF(r.right() - 2*radius, r.bottom() - 2*radius, 2*radius, 2*radius)
-            # Start angle 270 (bottom) span -90 (counter-clockwise to right) -> checks out? 
-            # Qt angles: 0 is right (3 o'clock). 270 is bottom (6 o'clock). 
-            # We want from Bottom (270) to Right (360/0).
-            # 其实 270 is 6 o'clock. 
-            # arcTo(rect, startAngle, sweepLength)
-            # We connect from bottom edge.
-            
-            # Simpler approach: Line to corner start, then arc?
-            # actually, just using addRoundedRect clip is easier, but let's draw the shape explicitly.
-            
-            # Point A: (Right - handle, Bottom)
-            # Point B: (Right, Bottom - handle)
-            # Outer edge is the corner.
-            
-            path.lineTo(r.right() - radius, r.bottom()) # Line to start of arc
-            path.arcTo(corner_rect, 270, 90) # The corner itself
-            path.lineTo(r.right(), r.bottom() - handle_size) # Line up to handle top
-            
-            # 3. Inner Edge: Curve inward back to start
-            # This creates the "extruded" look
-            # Control point near the inner corner
-            path.quadTo(r.right() - 4, r.bottom() - 4, r.right() - handle_size, r.bottom())
-            
-            path.closeSubpath()
-            
-            # Glass Style
-            painter.setPen(Qt.PenStyle.NoPen)
-            
-            # Gradient for glass/shiny look
-            # Fix: Start gradient at handle's top-left, not button's top-left
-            grad = QLinearGradient(QPointF(r.right() - handle_size, r.bottom() - handle_size), QPointF(r.bottomRight()))
-            grad.setColorAt(0.0, QColor(255, 255, 255, 120)) # Start brighter 
-            grad.setColorAt(1.0, QColor(255, 255, 255, 10))  # Fade out
-            
-            painter.setBrush(QBrush(grad))
-            painter.drawPath(path)
-            
-            # Accent line (Inner Edge only) for sharpness
-            # We re-stroke just the inner curve? 
-            # Or just stroke the whole path?
-            pen = QPen(QColor(255, 255, 255, 70))
-            pen.setWidthF(2.0)
-            painter.strokePath(path, pen)
-
+        # Delegate painting logic to helper
+        DashboardButtonPainter.paint(self, event)
+    
     def set_border_effect(self, effect: str):
         self._border_effect = effect
         self.update()
 
-    def _draw_rainbow_border(self, painter, rect, opacity, angle):
-        colors = ["#4285F4", "#EA4335", "#FBBC05", "#34A853", "#4285F4"]
-        self._draw_gradient_border(painter, rect, opacity, angle, colors)
-
-    def _draw_aurora_border(self, painter, rect, opacity, angle):
-        colors = ["#00C896", "#0078FF", "#8C00FF", "#0078FF", "#00C896"]
-        self._draw_gradient_border(painter, rect, opacity, angle, colors)
-
-    def _draw_gradient_border(self, painter, rect, opacity, angle, colors):
-        gradient = QConicalGradient(QPointF(rect.center()), angle)
-        for i, color in enumerate(colors):
-            gradient.setColorAt(i / (len(colors) - 1), QColor(color))
-        
-        pen = QPen()
-        pen.setWidth(2)
-        pen.setBrush(QBrush(gradient))
-        
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(rect, 9, 9)
-
     def _on_long_press(self):
-        """Handle long press: Start dimmer or climate if applicable."""
+        """Handle long press: Start dimmer, climate, or volume if applicable."""
         if not self.config: return
         
         btn_type = self.config.get('type', 'switch')
+        
+        if hasattr(self, 'bounce_anim') and self._bounce_offset > 0:
+            self.bounce_anim.stop()
+            self.bounce_anim.setDuration(300)
+            self.bounce_anim.setEasingCurve(QEasingCurve.Type.OutBack)
+            self.bounce_anim.setEndValue(0.0)
+            self.bounce_anim.start()
         
         # Get absolute coordinates
         global_pos = self.mapToGlobal(QPoint(0,0))
@@ -795,8 +800,10 @@ class DashboardButton(QFrame):
         
         if btn_type == 'switch':
             # Lights show dimmer overlay
-            self._ignore_release = True
-            self.dimmer_requested.emit(self.slot, rect)
+            entity_id = self.config.get('entity_id', '')
+            if entity_id.startswith('light.'):
+                self._ignore_release = True
+                self.dimmer_requested.emit(self.slot, rect)
         elif btn_type == 'curtain':
             # Long press on curtain -> Position slider (uses same dimmer overlay)
             self._ignore_release = True
@@ -805,9 +812,20 @@ class DashboardButton(QFrame):
             # Long press on climate -> Climate overlay
             self._ignore_release = True
             self.climate_requested.emit(self.slot, rect)
+        elif btn_type == 'weather':
+            self._ignore_release = True
+            self.weather_requested.emit(self.slot, rect)
+        elif btn_type == 'media_player':
+            # Long press on media player -> Volume overlay
+            self._ignore_release = True
+            self.volume_requested.emit(self.slot, rect)
             
     def mousePressEvent(self, event):
         """Track click start."""
+        # Forbidden buttons are completely non-interactive
+        if self.config and self.config.get('type') == 'forbidden':
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton:
             # Use global position for resizing to handle widget movement reflow
             self._drag_start_pos = event.globalPosition().toPoint()
@@ -825,6 +843,13 @@ class DashboardButton(QFrame):
                 self._is_resizing = False
                 self._ignore_release = False
                 self._long_press_timer.start()
+                
+                if self.config:
+                    self.bounce_anim.stop()
+                    self.bounce_anim.setDuration(40)
+                    self.bounce_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+                    self.bounce_anim.setEndValue(1.0)
+                    self.bounce_anim.start()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -862,6 +887,10 @@ class DashboardButton(QFrame):
         if not self._drag_start_pos:
             return
             
+        # Prevent dragging "Add" buttons (empty config)
+        if not self.config:
+            return
+            
         # Resize Logic
         if self._is_resizing:
             # Use distinct global pos diff
@@ -871,9 +900,10 @@ class DashboardButton(QFrame):
             dx_steps = round(diff.x() / 90.0) # Approx cell width + gap
             dy_steps = round(diff.y() / 90.0) 
             
-            # Clamp: max 4 wide, max 2 tall
+            # Clamp: max 4 wide, max 3 tall explicitly for 3d printer
             new_span_x = max(1, min(4, self._resize_start_span[0] + dx_steps))
-            new_span_y = max(1, min(2, self._resize_start_span[1] + dy_steps))
+            max_y_allowed = 3 if self.config.get('type') == '3d_printer' else 2
+            new_span_y = max(1, min(max_y_allowed, self._resize_start_span[1] + dy_steps))
             
             if new_span_x != self.span_x or new_span_y != self.span_y:
                 self.resize_requested.emit(self.slot, new_span_x, new_span_y)
@@ -885,6 +915,10 @@ class DashboardButton(QFrame):
             
         # Drag started -> Cancel long press
         self._long_press_timer.stop()
+        
+        if hasattr(self, 'bounce_anim') and self._bounce_offset > 0:
+            self.bounce_anim.stop()
+            self.set_bounce_offset(0.0) # immediate snap back for drag
         
         # Proceed with drag
         drag = QDrag(self)
@@ -923,6 +957,13 @@ class DashboardButton(QFrame):
         """Handle click."""
         self._long_press_timer.stop()
         
+        if hasattr(self, 'bounce_anim') and self._bounce_offset > 0:
+            self.bounce_anim.stop()
+            self.bounce_anim.setDuration(300)
+            self.bounce_anim.setEasingCurve(QEasingCurve.Type.OutBack)
+            self.bounce_anim.setEndValue(0.0)
+            self.bounce_anim.start()
+        
         if self._ignore_release:
             # Long press consumed the event
             self._ignore_release = False
@@ -936,8 +977,58 @@ class DashboardButton(QFrame):
             return
 
         if self._drag_start_pos and event.button() == Qt.MouseButton.LeftButton:
-             self.trigger_feedback() # Show feedback BEFORE emit
+             if self.config:
+                 self.trigger_feedback() # Show feedback BEFORE emit
              
+             # Media Player Logic
+             if self.config and self.config.get('type') == 'media_player':
+                 x = event.pos().x()
+                 y = event.pos().y()
+                 w = self.width()
+                 h = self.height()
+                 is_huge = self.span_x >= 2 and self.span_y >= 2
+                 is_tall = self.span_y >= 2 and self.span_x < 2
+                 is_wide = self.span_x >= 2
+                 
+                 if is_huge:
+                     # 2x2: Controls in center (redesigned)
+                     # Hit area: +/- 30px from center
+                     center_y = h // 2
+                     if center_y - 30 <= y <= center_y + 30:
+                         if x < w / 3:
+                             self.clicked.emit({**self.config, 'action': 'media_previous_track'})
+                         elif x > (w / 3) * 2:
+                             self.clicked.emit({**self.config, 'action': 'media_next_track'})
+                         else:
+                             self.clicked.emit({**self.config, 'action': 'media_play_pause'})
+                     else:
+                         # Top/Bottom click -> play/pause (or future detail view)
+                         self.clicked.emit({**self.config, 'action': 'media_play_pause'})
+                 elif is_tall:
+                     # 1x2: Top half = play/pause, bottom half = prev/next
+                     if y < h / 2:
+                         self.clicked.emit({**self.config, 'action': 'media_play_pause'})
+                     else:
+                         if x < w / 2:
+                             self.clicked.emit({**self.config, 'action': 'media_previous_track'})
+                         else:
+                             self.clicked.emit({**self.config, 'action': 'media_next_track'})
+                 elif is_wide:
+                     # 2x1: Thirds
+                     if x < w / 3:
+                         self.clicked.emit({**self.config, 'action': 'media_previous_track'})
+                     elif x > (w / 3) * 2:
+                         self.clicked.emit({**self.config, 'action': 'media_next_track'})
+                     else:
+                         self.clicked.emit({**self.config, 'action': 'media_play_pause'})
+                 else:
+                     # 1x1: Play/Pause
+                     self.clicked.emit({**self.config, 'action': 'media_play_pause'})
+                 
+                 self._drag_start_pos = None
+                 super().mouseReleaseEvent(event)
+                 return
+
              # Script/Scene: Trigger pulse animation
              if self.config and self.config.get('type') in ['script', 'scene']:
                  self.pulse_anim.stop()
@@ -948,16 +1039,52 @@ class DashboardButton(QFrame):
                  global_pos = self.mapToGlobal(QPoint(0,0))
                  rect = QRect(global_pos, self.size())
                  self.climate_requested.emit(self.slot, rect)
+             elif self.config and self.config.get('type') == 'weather':
+                 global_pos = self.mapToGlobal(QPoint(0,0))
+                 rect = QRect(global_pos, self.size())
+                 self.weather_requested.emit(self.slot, rect)
              elif self.config and self.config.get('type') == 'camera':
                  # Camera buttons have no click action
                  pass
+             elif self.config and self.config.get('type') == '3d_printer':
+                 global_pos = self.mapToGlobal(QPoint(0,0))
+                 rect = QRect(global_pos, self.size())
+                 self.printer_requested.emit(self.slot, rect, self.config)
+             elif self.config and self.config.get('type') == 'lock':
+                 # Toggle lock state
+                 action = 'unlock' if self._state == 'locked' else 'lock'
+                 self.clicked.emit({**self.config, 'action': action})
              else:
                  self.clicked.emit(self.config)
         self._drag_start_pos = None
         super().mouseReleaseEvent(event)
 
+    def wheelEvent(self, event):
+        """Handle scroll wheel for media player volume."""
+        if self.config and self.config.get('type') == 'media_player':
+            entity_id = self.config.get('entity_id', '')
+            if entity_id:
+                attrs = self._media_state.get('attributes', {})
+                current_vol = attrs.get('volume_level', 0.5)
+                # Each step ~ 5% volume
+                delta = event.angleDelta().y()
+                step = 0.05 if delta > 0 else -0.05
+                new_vol = max(0.0, min(1.0, current_vol + step))
+                if new_vol != current_vol:
+                    self.volume_scroll.emit(entity_id, new_vol)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
     def leaveEvent(self, event):
         """Reset handle when mouse leaves."""
+        if hasattr(self, 'bounce_anim') and self._bounce_offset > 0:
+            self.bounce_anim.stop()
+            self.bounce_anim.setDuration(300)
+            self.bounce_anim.setEasingCurve(QEasingCurve.Type.OutBack)
+            self.bounce_anim.setEndValue(0.0)
+            self.bounce_anim.start()
+
         if self._resize_handle_opacity > 0.0:
             self.resize_anim.stop()
             self.resize_anim.setEndValue(0.0)
@@ -982,26 +1109,13 @@ class DashboardButton(QFrame):
         
         super().enterEvent(event)
 
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat(MIME_TYPE):
-            event.accept()
-        else:
-            event.ignore()
 
-    def dropEvent(self, event):
-        if event.mimeData().hasFormat(MIME_TYPE):
-            data = event.mimeData().data(MIME_TYPE)
-            stream = QDataStream(data, QIODevice.OpenModeFlag.ReadOnly)
-            source_slot = stream.readInt32()
-            
-            if source_slot != self.slot:
-                self.dropped.emit(source_slot, self.slot)
-            event.accept()
-        else:
-            event.ignore()
 
     def show_context_menu(self, pos):
         """Show context menu for right click."""
+        # Forbidden buttons have no context menu
+        if self.config and self.config.get('type') == 'forbidden':
+            return
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -1054,5 +1168,13 @@ class DashboardButton(QFrame):
              global_pos = self.mapToGlobal(QPoint(0,0))
              rect = QRect(global_pos, self.size())
              self.climate_requested.emit(self.slot, rect)
+        elif self.config.get('type') == 'weather':
+             global_pos = self.mapToGlobal(QPoint(0,0))
+             rect = QRect(global_pos, self.size())
+             self.weather_requested.emit(self.slot, rect)
+        elif self.config.get('type') == '3d_printer':
+             global_pos = self.mapToGlobal(QPoint(0,0))
+             rect = QRect(global_pos, self.size())
+             self.printer_requested.emit(self.slot, rect, self.config)
         else:
              self.clicked.emit(self.config)

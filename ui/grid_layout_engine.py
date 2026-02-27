@@ -1,12 +1,14 @@
 """
 Grid Layout Engine for Prism Desktop
 Handles the mathematical logic for placing buttons in the dashboard grid.
+Uses explicit (row, col) coordinates for stable positioning across resizes.
 """
 
 class GridLayoutEngine:
     """
     Calculates grid positions for buttons based on their configuration and spans.
-    Decouples layout logic from the UI rendering in Dashboard.
+    Buttons store their position as (row, col) which is independent of the
+    current grid dimensions. Buttons outside the visible area are hidden.
     """
     
     def __init__(self, cols: int = 4):
@@ -17,15 +19,16 @@ class GridLayoutEngine:
         Calculate positions for all buttons.
         
         Args:
-            buttons: List of DashboardButton objects (or objects with .config, .slot, .span_x/y attrs)
+            buttons: List of DashboardButton objects (or objects with .config, .span_x/y attrs)
             rows: Total number of rows in the grid
             
         Returns:
             List of tuples: (button, row, col, span_y, span_x)
-            Buttons that shouldn't be shown are not included in the list.
+            Buttons outside the visible grid are excluded.
         """
         occupied = set()
         placements = []
+        self._forbidden_cells = set()  # Track cells blocked by out-of-bounds buttons
         
         # Separate configured buttons from empty Add buttons
         configured_buttons = []
@@ -37,50 +40,52 @@ class GridLayoutEngine:
             else:
                 empty_buttons.append(button)
         
-        # Sort configured buttons by config's slot (determines placement priority)
-        # Use a stable sort key
-        configured_buttons.sort(key=lambda b: b.config.get('slot', 999))
+        # Sort configured buttons by (row, col) for deterministic placement
+        configured_buttons.sort(key=lambda b: (
+            b.config.get('row', 0),
+            b.config.get('col', 0)
+        ))
         
-        # Pass 1: Place configured buttons
+        # Pass 1: Place configured buttons at their (row, col)
         for button in configured_buttons:
-            # Get dimensions
             span_x = getattr(button, 'span_x', 1)
             span_y = getattr(button, 'span_y', 1)
             
-            # Get preferred slot
-            config_slot = button.config.get('slot', button.slot)
+            r = button.config.get('row', 0)
+            c = button.config.get('col', 0)
             
-            # Preferred position
-            pref_row = config_slot // self.cols
-            pref_col = config_slot % self.cols
+            # Visibility check: skip if ANY part falls outside current grid
+            if c + span_x > self.cols or r + span_y > rows:
+                # Button is outside visible area — don't place it.
+                # Mark the cells that ARE within the grid as forbidden
+                # so they show a blocked indicator instead of an Add button.
+                for dy in range(span_y):
+                    for dx in range(span_x):
+                        cell_r = r + dy
+                        cell_c = c + dx
+                        if cell_r < rows and cell_c < self.cols:
+                            self._forbidden_cells.add((cell_r, cell_c))
+                            # Do NOT mark as occupied, so Pass 2 fills it with an empty button
+                            # which we then convert to 'forbidden' in the dashboard.
+                continue
             
-            # Check if preferred position works
-            if self._can_place(pref_row, pref_col, span_x, span_y, rows, occupied):
-                r, c = pref_row, pref_col
+            # Check if cells are available
+            if self._can_place(r, c, span_x, span_y, rows, occupied):
+                self._mark_occupied(r, c, span_x, span_y, occupied)
+                placements.append((button, r, c, span_y, span_x))
             else:
-                # Fallback: find any available spot
-                r, c = self._find_first_available(span_x, span_y, rows, occupied)
-                
-                # If no spot found (e.g. item too big for remaining space)
-                if r is None:
-                    continue 
-
-            # Place user
-            self._mark_occupied(r, c, span_x, span_y, occupied)
-            placements.append((button, r, c, span_y, span_x))
-            
-            # Update the button's internal slot to match reality (for future saves)
-            # Note: We return this info, but modifying the button object here is convenient 
-            # if we assume 'buttons' are mutable objects. 
-            # Ideally the caller handles state updates, but 'slot' is a property of the button.
-            new_slot = r * self.cols + c
-            # We don't modify button.config here to avoid side effects during calculation,
-            # but we return the new slot implicitly via (row, col).
-            
-        # Pass 2: Fill empty holes with "Add" buttons
-        # We need to fill specifically the empty cells that are NOT occupied
+                # Collision detected!
+                # Mark visible parts of THIS button as forbidden if they aren't occupied
+                for dy in range(span_y):
+                    for dx in range(span_x):
+                        cell_r = r + dy
+                        cell_c = c + dx
+                        # If cell is valid and NOT occupied by a higher-priority button
+                        if cell_r < rows and cell_c < self.cols:
+                            if (cell_r, cell_c) not in occupied:
+                                self._forbidden_cells.add((cell_r, cell_c))
         
-        # We iterate through all cells in order
+        # Pass 2: Fill empty holes with "Add" buttons
         empty_idx = 0
         total_cells = rows * self.cols
         
@@ -93,32 +98,125 @@ class GridLayoutEngine:
                     btn = empty_buttons[empty_idx]
                     empty_idx += 1
                     
-                    # Add buttons are always 1x1
                     placements.append((btn, r, c, 1, 1))
                     occupied.add((r, c))
                     
         return placements
 
-    def find_first_empty_slot(self, buttons: list, rows: int, span_x: int = 1, span_y: int = 1) -> int:
-        """Find the first visual slot index that is completely empty and fits the span."""
+    def get_forbidden_cells(self) -> set:
+        """Return the set of (row, col) cells that are forbidden (blocked by out-of-bounds buttons)."""
+        return getattr(self, '_forbidden_cells', set())
+
+    def find_first_empty_slot(self, buttons: list, rows: int, span_x: int = 1, span_y: int = 1) -> tuple:
+        """Find the first visible (row, col) that is completely empty and fits the span.
+        
+        Returns (row, col) or (-1, -1) if no space.
+        """
         occupied = set()
         
-        # Calculate currently occupied cells from existing placed buttons
         for button in buttons:
             if not button.config: continue 
-            if not button.isVisible(): continue # Only count visible buttons!
+            if not button.isVisible(): continue
             
-            # We assume button.slot is accurate to its current visual position
-            sl = button.slot
-            r = sl // self.cols
-            c = sl % self.cols
+            r = button.config.get('row', 0)
+            c = button.config.get('col', 0)
             sx = getattr(button, 'span_x', 1)
             sy = getattr(button, 'span_y', 1)
             
             self._mark_occupied(r, c, sx, sy, occupied)
 
-        # Check all possible slots
-        return self._find_first_available_slot_index(span_x, span_y, rows, occupied)
+        r, c = self._find_first_available(span_x, span_y, rows, occupied)
+        if r is not None:
+            return (r, c)
+        return (-1, -1)
+
+    def find_relocations(self, resizing_btn, new_span_x, new_span_y, all_buttons, rows):
+        """
+        Compute relocations needed when resizing_btn expands to (new_span_x, new_span_y).
+        
+        Returns:
+            List of (button, new_row, new_col) tuples if all displaced buttons
+            can be relocated, or None if the resize should be blocked.
+        """
+        if not resizing_btn.config:
+            return []
+        
+        src_r = resizing_btn.config.get('row', 0)
+        src_c = resizing_btn.config.get('col', 0)
+        
+        # 1. Compute the footprint of the resized button
+        new_footprint = set()
+        for dy in range(new_span_y):
+            for dx in range(new_span_x):
+                new_footprint.add((src_r + dy, src_c + dx))
+        
+        # 2. Identify displaced buttons (configured buttons whose cells overlap)
+        displaced = []
+        for btn in all_buttons:
+            if btn is resizing_btn:
+                continue
+            if not btn.config or not btn.config.get('entity_id'):
+                continue
+            
+            br = btn.config.get('row', 0)
+            bc = btn.config.get('col', 0)
+            bsx = getattr(btn, 'span_x', btn.config.get('span_x', 1))
+            bsy = getattr(btn, 'span_y', btn.config.get('span_y', 1))
+            
+            # Check if any cell of this button overlaps the new footprint
+            overlaps = False
+            for dy in range(bsy):
+                for dx in range(bsx):
+                    if (br + dy, bc + dx) in new_footprint:
+                        overlaps = True
+                        break
+                if overlaps:
+                    break
+            
+            if overlaps:
+                displaced.append(btn)
+        
+        if not displaced:
+            return []  # No conflicts
+        
+        # 3. Build occupied set from all non-displaced configured buttons + resized button
+        occupied = set()
+        
+        # Mark resized button's new footprint
+        for cell in new_footprint:
+            occupied.add(cell)
+        
+        # Mark all other configured buttons that are NOT displaced
+        displaced_set = set(id(b) for b in displaced)
+        for btn in all_buttons:
+            if btn is resizing_btn:
+                continue
+            if not btn.config or not btn.config.get('entity_id'):
+                continue
+            if id(btn) in displaced_set:
+                continue
+            
+            br = btn.config.get('row', 0)
+            bc = btn.config.get('col', 0)
+            bsx = getattr(btn, 'span_x', btn.config.get('span_x', 1))
+            bsy = getattr(btn, 'span_y', btn.config.get('span_y', 1))
+            self._mark_occupied(br, bc, bsx, bsy, occupied)
+        
+        # 4. Try to relocate each displaced button
+        relocations = []
+        for btn in displaced:
+            bsx = getattr(btn, 'span_x', btn.config.get('span_x', 1))
+            bsy = getattr(btn, 'span_y', btn.config.get('span_y', 1))
+            
+            new_r, new_c = self._find_first_available(bsx, bsy, rows, occupied)
+            if new_r is None:
+                # No room — block the resize
+                return None
+            
+            self._mark_occupied(new_r, new_c, bsx, bsy, occupied)
+            relocations.append((btn, new_r, new_c))
+        
+        return relocations
 
     # --- Helper Methods ---
 
@@ -141,16 +239,8 @@ class GridLayoutEngine:
 
     def _find_first_available(self, span_x, span_y, max_rows, occupied):
         """Finds first (r, c) that fits, or (None, None)."""
-        # Search row by row, col by col
         for r in range(max_rows):
             for c in range(self.cols):
                 if self._can_place(r, c, span_x, span_y, max_rows, occupied):
                     return r, c
         return None, None
-
-    def _find_first_available_slot_index(self, span_x, span_y, max_rows, occupied):
-        """Same as above but returns slot index."""
-        r, c = self._find_first_available(span_x, span_y, max_rows, occupied)
-        if r is not None:
-            return r * self.cols + c
-        return -1

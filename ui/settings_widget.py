@@ -8,10 +8,11 @@ from typing import Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QLineEdit, QPushButton, QComboBox, QFormLayout, 
-    QCheckBox, QGraphicsOpacityEffect, QFrame
+    QCheckBox, QGraphicsOpacityEffect, QFrame, QColorDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtProperty, pyqtSlot, QUrl
-from PyQt6.QtGui import QFont, QColor, QDesktopServices
+from PyQt6.QtGui import QFont, QColor, QDesktopServices, QIcon, QPixmap
+from core.utils import SYSTEM_FONT
 
 from core.worker_threads import ConnectionTestThread
 from services.update_checker import UpdateCheckerThread
@@ -37,8 +38,6 @@ class SettingsWidget(QWidget):
         
         self._test_thread: Optional[ConnectionTestThread] = None
         self._opacity = 1.0
-        self._selected_rows = config.get('appearance', {}).get('rows', 2)
-        
         # Opacity effect for animations - DISABLED FOR DEBUGGING
         # self._opacity_effect = QGraphicsOpacityEffect(self)
         # self._opacity_effect.setOpacity(1.0)
@@ -96,21 +95,31 @@ class SettingsWidget(QWidget):
             checkbox_bg = "rgba(255, 255, 255, 0.05)"
             checkbox_border = "#555"
             section_header_color = "#8e8e93"  # Apple gray for dark mode
+            
+        # Pill Background (Semi-transparent container for readability)
+        if is_light:
+            pill_bg = "rgba(255, 255, 255, 0.6)"
+            pill_border = "rgba(0, 0, 0, 0.05)"
+        else:
+            pill_bg = "rgba(30, 30, 30, 0.6)"
+            pill_border = "rgba(255, 255, 255, 0.05)"
+            
+        from ui.styles import Typography, Dimensions
         
         self.setStyleSheet(f"""
             QWidget {{ 
-                font-family: 'Segoe UI', sans-serif; 
-                font-size: 13px;
+                font-family: {Typography.FONT_FAMILY_UI}; 
+                font-size: {Typography.SIZE_BODY};
                 color: {colors['text']};
             }}
             QLabel#headerTitle {{
-                font-size: 18px;
-                font-weight: 600;
+                font-size: {Typography.SIZE_HEADER};
+                font-weight: {Typography.WEIGHT_SEMIBOLD};
                 color: {colors['window_text']};
             }}
             QLabel#sectionHeader {{
-                font-size: 11px;
-                font-weight: 700;
+                font-size: {Typography.SIZE_SMALL};
+                font-weight: {Typography.WEIGHT_BOLD};
                 color: {section_header_color};
                 margin-top: 10px;
                 margin-bottom: 2px;
@@ -118,7 +127,7 @@ class SettingsWidget(QWidget):
             QLineEdit, QComboBox {{
                 background-color: {input_bg};
                 border: 1px solid {input_border};
-                border-radius: 6px;
+                border-radius: {Dimensions.RADIUS_MEDIUM};
                 padding: 6px 10px;
                 color: {colors['text']};
                 selection-background-color: {colors['accent']};
@@ -137,9 +146,9 @@ class SettingsWidget(QWidget):
                 background-color: {colors['button']};
                 color: {colors['button_text']};
                 border: 1px solid {colors['border']};
-                border-radius: 6px;
-                padding: 6px 14px;
-                font-weight: 500;
+                border-radius: {Dimensions.RADIUS_MEDIUM};
+                padding: {Dimensions.PADDING_MEDIUM} {Dimensions.PADDING_LARGE};
+                font-weight: {Typography.WEIGHT_MEDIUM};
             }}
             QPushButton:hover {{ background-color: {colors['accent']}; color: white; }}
             QPushButton:pressed {{ background-color: {colors['accent']}; }}
@@ -156,7 +165,7 @@ class SettingsWidget(QWidget):
                 max-width: 42px;
                 min-height: 32px;
                 max-height: 32px;
-                border-radius: 4px;
+                border-radius: {Dimensions.RADIUS_SMALL};
                 background-color: transparent;
                 border: 1px solid {colors['border']};
                 color: {colors['text']};
@@ -171,7 +180,7 @@ class SettingsWidget(QWidget):
             QCheckBox {{ spacing: 8px; color: {colors['text']}; }}
             QCheckBox::indicator {{
                 width: 18px; height: 18px;
-                border-radius: 4px;
+                border-radius: {Dimensions.RADIUS_SMALL};
                 border: 1px solid {checkbox_border};
                 background: {checkbox_bg};
             }}
@@ -181,33 +190,30 @@ class SettingsWidget(QWidget):
             }}
             
             QPushButton#recordBtn {{
-                background-color: #EA4335;
+                background-color: #C62828;
                 border: none;
-                border-radius: 6px;
+                border-radius: {Dimensions.RADIUS_MEDIUM};
             }}
             QPushButton#recordBtn:hover {{
-                background-color: #D33428;
+                background-color: #B71C1C;
             }}
             QPushButton#recordBtn:checked {{
-                background-color: #B71C1C;
+                background-color: #8E0000;
             }}
             
             QWidget#recordIcon {{
                 background-color: white;
-                border-radius: 6px;
+                border-radius: {Dimensions.RADIUS_MEDIUM};
             }}
             
             QPushButton#coffeeBtn {{
                 background-color: {colors['accent']};
                 color: white;
                 border: 1px solid {colors['accent']};
-                font-weight: 500;
-                font-size: 13px;
-                border-radius: 6px;
-                padding: 6px 12px;
-            }}
-            QPushButton#coffeeBtn:hover {{
-                background-color: #006ce6;
+                font-weight: {Typography.WEIGHT_MEDIUM};
+                font-size: {Typography.SIZE_BODY};
+                border-radius: {Dimensions.RADIUS_MEDIUM};
+                padding: {Dimensions.PADDING_MEDIUM} 12px;
             }}
             QPushButton#coffeeBtn:hover {{
                 background-color: #006ce6;
@@ -216,13 +222,19 @@ class SettingsWidget(QWidget):
             QPushButton#updateBtn {{
                 background-color: {colors['button']};
                 border: 1px solid {colors['border']};
-                border-radius: 6px;
-                padding: 6px 12px;
+                border-radius: {Dimensions.RADIUS_MEDIUM};
+                padding: {Dimensions.PADDING_MEDIUM} 12px;
             }}
             QPushButton#updateBtn:hover {{
                 background-color: {colors['accent']};
                 color: white;
                 border-color: {colors['accent']};
+            }}
+            
+            QFrame#settingsPill {{
+                background-color: {pill_bg};
+                border: 1px solid {pill_border};
+                border-radius: 16px;
             }}
         """)
         
@@ -266,10 +278,21 @@ class SettingsWidget(QWidget):
         
         layout.addLayout(header_layout)
         
-        # 2. Form Layout (Content)
+        # 2. Pill Container for Form Content
+        self.pill_frame = QFrame()
+        self.pill_frame.setObjectName("settingsPill")
+        pill_layout = QVBoxLayout(self.pill_frame)
+        pill_layout.setContentsMargins(20, 20, 20, 20)
+        pill_layout.setSpacing(10)
+        
+        layout.addWidget(self.pill_frame)
+        
+        # 3. Form Layout (Inside Pill)
         self.form = QFormLayout()
         self.form.setVerticalSpacing(14)
         self.form.setHorizontalSpacing(16)
+        
+        pill_layout.addLayout(self.form)
         
         # --- Home Assistant Section ---
         self._add_section_header("HOME ASSISTANT")
@@ -307,36 +330,37 @@ class SettingsWidget(QWidget):
         self.form.addRow("Theme:", self.theme_combo)
 
         # Border Effect
-        self.border_effect_combo = QComboBox()
-        self.border_effect_combo.addItems(["Rainbow", "Aurora Borealis", "None"])
+        from ui.widgets.effect_combobox import EffectComboBox
+        self.border_effect_combo = EffectComboBox()
+        self.border_effect_combo.addItems(["Rainbow", "Aurora Borealis", "Prism Shard", "Liquid Mercury", "None"])
         self.border_effect_combo.setMinimumWidth(120)
+        # Connect change to self-update so user sees effect immediately
+        self.border_effect_combo.currentTextChanged.connect(self.on_border_effect_changed)
         self.form.addRow("Border Effect:", self.border_effect_combo)
         
-        # Rows (Segmented Buttons)
-        rows_row = QHBoxLayout()
-        rows_row.setContentsMargins(0, 0, 0, 0)
-        rows_row.setSpacing(4)
-        self.row_buttons = []
-        for i in range(2, 7):  # 2, 3, 4, 5, 6 rows
-            btn = QPushButton(str(i))
-            btn.setObjectName("rowBtn")
-            btn.setCheckable(True)
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(lambda checked, idx=i: self.on_row_selected(idx))
-            rows_row.addWidget(btn)
-            self.row_buttons.append(btn)
-        rows_row.addStretch()
-        self.form.addRow("Size:", rows_row)
+        # Button Style
+        self.button_style_combo = QComboBox()
+        self.button_style_combo.addItems(["Gradient", "Flat"])
+        self.button_style_combo.setMinimumWidth(120)
+        self.form.addRow("Button Style:", self.button_style_combo)
         
+
+        
+        # Show Dimming Option
+        self.show_dimming_check = QCheckBox("Show dimming")
+        self.show_dimming_check.setToolTip("Fade button color based on brightness level")
+        self.show_dimming_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.form.addRow("", self.show_dimming_check)
+        
+        # Glass UI Option
+        self.glass_ui_check = QCheckBox("Glass UI (EXPERIMENTAL)")
+        self.glass_ui_check.setToolTip("Use a translucent glass background for the window")
+        self.glass_ui_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.form.addRow("", self.glass_ui_check)
         
         # --- Shortcut Section ---
         self._add_section_header("SHORTCUT")
 
-        # Modifier
-        self.modifier_combo = QComboBox()
-        self.modifier_combo.addItems(["None", "Alt", "Ctrl", "Shift"])
-        self.modifier_combo.setMinimumWidth(120)
-        self.form.addRow("Modifier:", self.modifier_combo)
         
         shortcut_row = QHBoxLayout()
         self.shortcut_display = QLineEdit()
@@ -374,7 +398,7 @@ class SettingsWidget(QWidget):
         
         # ... (Previous code)
         
-        layout.addLayout(self.form)
+        # layout.addLayout(self.form) - Already added to pill_layout
         
         # --- Support Section ---
         self._add_section_header("SUPPORT")
@@ -438,23 +462,33 @@ class SettingsWidget(QWidget):
         app = self.config.get('appearance', {})
         theme_map = {'system': 0, 'light': 1, 'dark': 2}
         idx = theme_map.get(app.get('theme', 'system'), 0)
-        idx = theme_map.get(app.get('theme', 'system'), 0)
         self.theme_combo.setCurrentIndex(idx)
         
         effect = app.get('border_effect', 'Rainbow')
+        
         effect_idx = self.border_effect_combo.findText(effect)
+        
+        # Prevent animation trigger on initial load
+        self.border_effect_combo.blockSignals(True)
         if effect_idx >= 0:
             self.border_effect_combo.setCurrentIndex(effect_idx)
+            self.border_effect_combo.set_effect(effect, animate=False)
         else:
              self.border_effect_combo.setCurrentIndex(0)
+             self.border_effect_combo.set_effect("Rainbow", animate=False)
+             
+        button_style = app.get('button_style', 'Gradient')
+        style_idx = self.button_style_combo.findText(button_style)
+        if style_idx >= 0:
+            self.button_style_combo.setCurrentIndex(style_idx)
+             
+        self.show_dimming_check.setChecked(app.get('show_dimming', False))
+        self.glass_ui_check.setChecked(app.get('glass_ui', False))
+             
+        self.border_effect_combo.blockSignals(False)
         
-        rows = app.get('rows', 2)
-        self.on_row_selected(rows)
-        
-
         
         sc = self.config.get('shortcut', {})
-        self.modifier_combo.setCurrentText(sc.get('modifier', 'Alt'))
         self.shortcut_display.setText(sc.get('value', ''))
         
     def save_settings(self):
@@ -468,32 +502,32 @@ class SettingsWidget(QWidget):
         
         # Appearance
         theme_map = {0: 'system', 1: 'light', 2: 'dark'}
-        if 'appearance' not in self.config: self.config['appearance'] = {}
         self.config['appearance'].update({
             'theme': theme_map.get(self.theme_combo.currentIndex(), 'system'),
             'border_effect': self.border_effect_combo.currentText(),
-            'rows': self._selected_rows,
-
+            'button_style': self.button_style_combo.currentText(),
+            'show_dimming': self.show_dimming_check.isChecked(),
+            'glass_ui': self.glass_ui_check.isChecked(),
         })
         
         # Shortcut handled by record signal, but good to ensure consistency
         # (Shortcut saves immediately on record in config dict)
         if 'shortcut' not in self.config: self.config['shortcut'] = {}
-        self.config['shortcut']['modifier'] = self.modifier_combo.currentText()
         
         self.settings_saved.emit(self.config)
 
     # --- Logic ---
 
-    def on_row_selected(self, rows):
-        self._selected_rows = rows
-        for i, btn in enumerate(self.row_buttons):
-            btn.setChecked((i + 2) == rows)
-
     def on_theme_preview(self, index):
         if self.theme_manager:
             theme_map = {0: 'system', 1: 'light', 2: 'dark'}
             self.theme_manager.set_theme(theme_map.get(index, 'system'))
+
+    def on_border_effect_changed(self, text):
+        self.border_effect_combo.set_effect(text)
+
+
+
 
     def toggle_recording(self, checked):
         if not self.input_manager:
@@ -508,9 +542,8 @@ class SettingsWidget(QWidget):
         else:
             # Record State (Circle)
             self.record_icon.setStyleSheet("background-color: white; border-radius: 6px;")
-            self.input_manager.stop_listening()
-            # Restore previous text if cancelled? 
-            # Ideally input manager handles this, but for now simplistic approach:
+            self.input_manager.restore_shortcut()
+            # Restore previous text if cancelled
             sc = self.config.get('shortcut', {})
             if self.shortcut_display.text() == "Press keys...":
                 self.shortcut_display.setText(sc.get('value', ''))
@@ -526,6 +559,9 @@ class SettingsWidget(QWidget):
         self.shortcut_display.setText(shortcut.get('value', ''))
         if 'shortcut' not in self.config: self.config['shortcut'] = {}
         self.config['shortcut'] = shortcut
+        
+        # Immediately re-register the new shortcut so it works without needing Save
+        self.input_manager.update_shortcut(shortcut)
 
     def test_connection(self):
         url = self.url_input.text().strip()

@@ -41,8 +41,6 @@ class UpdateCheckerThread(QThread):
             # Local version cleanup
             local_ver = self._extract_version(self.current_version)
             
-            print(f"DEBUG: Check - Local: '{local_ver}' (raw: {self.current_version}) | Remote: '{remote_ver}' (tag: {tag_name}, name: {name})")
-            
             if local_ver != remote_ver and remote_ver:
                 self.update_available.emit(remote_ver)
             else:

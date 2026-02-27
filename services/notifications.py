@@ -18,10 +18,6 @@ class NotificationManager(QObject):
         super().__init__()
         self.tray_icon = tray_icon
     
-    def set_tray_icon(self, tray_icon: QSystemTrayIcon):
-        """Set the system tray icon for showing notifications."""
-        self.tray_icon = tray_icon
-    
     def _show_linux_notification(self, title: str, message: str) -> bool:
         """Show notification on Linux using notify-send."""
         try:
@@ -77,12 +73,3 @@ class NotificationManager(QObject):
         
         # Fallback to Qt tray notification
         self._show_fallback_notification(title, message)
-    
-    def show_info(self, title: str, message: str):
-        """Show an info notification."""
-        self.show_ha_notification(title, message)
-    
-    def show_error(self, title: str, message: str):
-        """Show an error notification."""
-        print(f"❌ Error: {title} - {message}")
-        self.show_ha_notification(title, message)
