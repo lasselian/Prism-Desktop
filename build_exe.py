@@ -27,6 +27,7 @@ def build():
         "--onefile",
         "--name", "PrismDesktop",
         "--add-data", f"{font_path};.",  # Windows separator is ;
+        "--exclude", "PySide6",  # Avoid Qt binding conflict
     ]
     
     # Add icon if exists
