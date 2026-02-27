@@ -5,7 +5,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QColor, QFont, QFontMetrics, QPainter, QBrush, QPen, QLinearGradient, QConicalGradient, QPainterPath
 )
-from ui.icons import get_icon, get_mdi_font
+from ui.icons import get_icon, get_mdi_font, Icons
 from core.utils import SYSTEM_FONT
 from ui.widgets.dashboard_button_painter import DashboardButtonPainter
 
