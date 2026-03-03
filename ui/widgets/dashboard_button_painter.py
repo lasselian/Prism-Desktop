@@ -580,9 +580,16 @@ class DashboardButtonPainter:
             
             # Left: Status
             status_text_x = 16
-            painter.setFont(QFont(SYSTEM_FONT, 11, QFont.Weight.DemiBold))
+            status_font = QFont(SYSTEM_FONT, 11, QFont.Weight.DemiBold)
+            painter.setFont(status_font)
             painter.setPen(text_color)
-            painter.drawText(QRectF(status_text_x, cam_h, w/2, strip_h), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, printer_state.capitalize())
+            
+            # Constraint the width based on where the stats block starts
+            avail_w = (w / 2) - status_text_x - 8
+            fm = QFontMetrics(status_font)
+            elided_state = fm.elidedText(printer_state.capitalize(), Qt.TextElideMode.ElideRight, int(avail_w))
+            
+            painter.drawText(QRectF(status_text_x, cam_h, avail_w, strip_h), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, elided_state)
             
             # Right: Stats
             # Determine if we have extra space (width > 2 tiles)
@@ -644,9 +651,15 @@ class DashboardButtonPainter:
             text_x = icon_x + icon_size + 16
             
             # State Title
-            painter.setFont(QFont(SYSTEM_FONT, 12, QFont.Weight.Bold))
+            state_font = QFont(SYSTEM_FONT, 12, QFont.Weight.Bold)
+            painter.setFont(state_font)
             painter.setPen(text_color)
-            painter.drawText(QRectF(text_x, 16, w - text_x - 16, 24), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, printer_state)
+            
+            avail_width = w - text_x - 16
+            fm = QFontMetrics(state_font)
+            elided_state = fm.elidedText(printer_state, Qt.TextElideMode.ElideRight, int(avail_width))
+            
+            painter.drawText(QRectF(text_x, 16, avail_width, 24), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignBottom, elided_state)
             
             # Sub stats
             painter.setFont(QFont(SYSTEM_FONT, 10, QFont.Weight.Medium))
@@ -673,9 +686,14 @@ class DashboardButtonPainter:
             painter.drawText(top_half, Qt.AlignmentFlag.AlignCenter, icon)
             
             # State Title
-            painter.setFont(QFont(SYSTEM_FONT, 12, QFont.Weight.Bold))
+            state_font = QFont(SYSTEM_FONT, 12, QFont.Weight.Bold)
+            painter.setFont(state_font)
             painter.setPen(text_color)
-            painter.drawText(QRectF(0, 90, w, 24), Qt.AlignmentFlag.AlignCenter, printer_state.capitalize())
+            
+            fm = QFontMetrics(state_font)
+            elided_state = fm.elidedText(printer_state.capitalize(), Qt.TextElideMode.ElideRight, int(w - 16))
+            
+            painter.drawText(QRectF(0, 90, w, 24), Qt.AlignmentFlag.AlignCenter, elided_state)
             
             # Progress %
             try: prog_val = float(progress)

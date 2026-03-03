@@ -1,15 +1,12 @@
 import json
 import copy
-import keyring
-from typing import Optional
 from pathlib import Path
 from core.utils import get_config_path
+from core.token_storage import store_token, load_token
 
-SERVICE_NAME = "PrismDesktop"
-KEY_TOKEN = "ha_token"
 
 class ConfigManager:
-    """Manages application configuration and keyring tokens."""
+    """Manages application configuration and secure token storage."""
     
     def __init__(self, config_filename: str = "config.json"):
         self.config_path = get_config_path(config_filename)
@@ -32,29 +29,20 @@ class ConfigManager:
                 with open(self.config_path, 'r', encoding='utf-8') as f:
                     config = json.load(f)
                     
-                    # --- Keyring Migration & Loading ---
                     ha_config = config.get('home_assistant', {})
                     token_in_file = ha_config.get('token', '')
                     
-                    token_from_keyring = None
-                    try:
-                        token_from_keyring = keyring.get_password(SERVICE_NAME, KEY_TOKEN)
-                    except Exception as e:
-                        print(f"Keyring read error: {e}")
+                    # Load token from secure storage (keyring or encrypted file)
+                    stored_token = load_token()
                     
-                    if token_from_keyring:
-                        ha_config['token'] = token_from_keyring
+                    if stored_token:
+                        # Token found in secure storage — use it
+                        ha_config['token'] = stored_token
                     elif token_in_file:
-                        print("Migrating token to keyring...")
-                        try:
-                            keyring.set_password(SERVICE_NAME, KEY_TOKEN, token_in_file)
-                            if keyring.get_password(SERVICE_NAME, KEY_TOKEN) == token_in_file:
-                                print("Migration successful.")
-                                ha_config['token'] = '' 
-                                self.save_raw_config(config)
-                                ha_config['token'] = token_in_file
-                        except Exception as e:
-                            print(f"Migration failed: {e}")
+                        # Legacy: plaintext token in config.json — migrate it
+                        print("[ConfigManager] Migrating plaintext token to secure storage...")
+                        store_token(token_in_file)
+                        ha_config['token'] = token_in_file
                     
                     # --- Auto-migrate legacy slot-only configs to (row, col) ---
                     cols = config.get('appearance', {}).get('cols', 4)
@@ -91,12 +79,9 @@ class ConfigManager:
             token = ha_config.get('token', '')
             
             if token:
-                try:
-                    keyring.set_password(SERVICE_NAME, KEY_TOKEN, token)
-                    ha_config['token'] = '' 
-                except Exception as e:
-                    print(f"Keyring write error: {e}")
-                    ha_config['token'] = '' 
+                # Store token securely (keyring or encrypted file)
+                store_token(token)
+                ha_config['token'] = ''  # Always scrub from config.json
             
             self.save_raw_config(config_to_save)
         except Exception as e:

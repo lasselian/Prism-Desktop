@@ -312,6 +312,7 @@ class SettingsWidget(QWidget):
         self.test_btn.setMinimumWidth(120)
         self.test_btn.clicked.connect(self.test_connection)
         self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
         self.status_label.setStyleSheet("color: #aaa;")
         
         test_row.addWidget(self.test_btn)
@@ -586,11 +587,8 @@ class SettingsWidget(QWidget):
     def on_test_complete(self, success, message):
         self.test_btn.setEnabled(True)
         icon = "✅" if success else "❌"
-        # Truncate long error messages
-        display_msg = message[:30] + "..." if len(message) > 30 else message
-        self.status_label.setText(f"{icon} {display_msg}")
-
-        self.status_label.setText(f"{icon} {display_msg}")
+        # Display full message with wrap enabled on label
+        self.status_label.setText(f"{icon} {message}")
 
     def check_for_updates(self):
         """Start update check."""

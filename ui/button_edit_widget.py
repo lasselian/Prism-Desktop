@@ -6,7 +6,7 @@ Embedded Button Editor Widget
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QLineEdit, QPushButton, QComboBox, QFormLayout,
-    QCheckBox, QSpinBox
+    QCheckBox, QSpinBox, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QFont
@@ -36,7 +36,10 @@ class ButtonEditWidget(QWidget):
     
     saved = pyqtSignal(dict)
     cancelled = pyqtSignal()
-    size_changed = pyqtSignal()
+    size_changed = pyqtSignal()  # Emitted when widget needs to resize
+    
+    # Class-level preference for entity display format (persists across instances)
+    _global_show_friendly_names = True
     
     def __init__(self, entities: list, config: dict = None, slot: int = 0, theme_manager=None, input_manager=None, parent=None):
         super().__init__(parent)
@@ -45,6 +48,7 @@ class ButtonEditWidget(QWidget):
         self.slot = slot
         self.theme_manager = theme_manager
         self.input_manager = input_manager
+        # Removed instance-specific flag, now using class variable
         
         # Connect input manager if available
         if self.input_manager:
@@ -166,6 +170,11 @@ class ButtonEditWidget(QWidget):
                 background-color: white;
                 border-radius: {Dimensions.RADIUS_MEDIUM};
             }}
+            
+            QPushButton#friendlyToggleBtn {{
+                padding: {Dimensions.PADDING_MEDIUM} {Dimensions.PADDING_SMALL};
+                font-size: {Typography.SIZE_SMALL};
+            }}
         """)
         
     def setup_ui(self):
@@ -225,12 +234,20 @@ class ButtonEditWidget(QWidget):
         self.type_combo.currentIndexChanged.connect(self.on_type_changed)
         self.form.addRow("Type:", self.type_combo)
         
-        self.entity_combo = QComboBox()
-        self.entity_combo.setEditable(True)
-        self.entity_combo.setMaxVisibleItems(15)
+        # Display Toggle (Global across all entity dropdowns)
+        self.friendly_toggle_btn = QPushButton("Show IDs" if ButtonEditWidget._global_show_friendly_names else "Show Names")
+        self.friendly_toggle_btn.setObjectName("friendlyToggleBtn")
+        self.friendly_toggle_btn.setMinimumWidth(110)
+        self.friendly_toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.friendly_toggle_btn.setToolTip("Switch between showing friendly names and entity IDs globally")
+        self.friendly_toggle_btn.clicked.connect(self._toggle_entity_display)
+        self.form.addRow("Display:", self.friendly_toggle_btn) # Moved here
+        
+        self.entity_combo = self._create_entity_combo()
         self.entity_combo.lineEdit().setPlaceholderText("Select or type entity ID...")
         self.entity_combo.lineEdit().returnPressed.connect(self.save)
         self.populate_entities()
+        
         self.form.addRow("Entity:", self.entity_combo)
         
         # (Advanced mode toggle removed - climate now defaults to advanced)
@@ -288,40 +305,37 @@ class ButtonEditWidget(QWidget):
         
         # 3D Printer specific fields
         self.printer_state_label = QLabel("State Entity:")
-        self.printer_state_combo = QComboBox()
-        self.printer_state_combo.setEditable(True)
-        self.printer_state_combo.setMaxVisibleItems(15)
+        self.printer_state_combo = self._create_entity_combo()
         self.form.addRow(self.printer_state_label, self.printer_state_combo)
         
         self.printer_camera_label = QLabel("Camera Entity:")
-        self.printer_camera_combo = QComboBox()
-        self.printer_camera_combo.setEditable(True)
-        self.printer_camera_combo.setMaxVisibleItems(15)
+        self.printer_camera_combo = self._create_entity_combo()
         self.form.addRow(self.printer_camera_label, self.printer_camera_combo)
         
         self.printer_nozzle_label = QLabel("Nozzle Entity:")
-        self.printer_nozzle_combo = QComboBox()
-        self.printer_nozzle_combo.setEditable(True)
-        self.printer_nozzle_combo.setMaxVisibleItems(15)
+        self.printer_nozzle_combo = self._create_entity_combo()
         self.form.addRow(self.printer_nozzle_label, self.printer_nozzle_combo)
         
         self.printer_nozzle_target_label = QLabel("Nozzle Target Entity:")
-        self.printer_nozzle_target_combo = QComboBox()
-        self.printer_nozzle_target_combo.setEditable(True)
-        self.printer_nozzle_target_combo.setMaxVisibleItems(15)
+        self.printer_nozzle_target_combo = self._create_entity_combo()
         self.form.addRow(self.printer_nozzle_target_label, self.printer_nozzle_target_combo)
         
         self.printer_bed_label = QLabel("Bed Entity:")
-        self.printer_bed_combo = QComboBox()
-        self.printer_bed_combo.setEditable(True)
-        self.printer_bed_combo.setMaxVisibleItems(15)
+        self.printer_bed_combo = self._create_entity_combo()
         self.form.addRow(self.printer_bed_label, self.printer_bed_combo)
         
         self.printer_bed_target_label = QLabel("Bed Target Entity:")
-        self.printer_bed_target_combo = QComboBox()
-        self.printer_bed_target_combo.setEditable(True)
-        self.printer_bed_target_combo.setMaxVisibleItems(15)
+        self.printer_bed_target_combo = self._create_entity_combo()
         self.form.addRow(self.printer_bed_target_label, self.printer_bed_target_combo)
+        
+        self.printer_pause_label = QLabel("Pause/Resume Entity:")
+        self.printer_pause_combo = self._create_entity_combo()
+        self.form.addRow(self.printer_pause_label, self.printer_pause_combo)
+
+        self.printer_stop_label = QLabel("Stop Entity:")
+        self.printer_stop_combo = self._create_entity_combo()
+        self.form.addRow(self.printer_stop_label, self.printer_stop_combo)
+
         
         # --- Appearance Section ---
         self.appearance_header = self._add_section_header("APPEARANCE")
@@ -417,19 +431,57 @@ class ButtonEditWidget(QWidget):
         self.form.addRow("Keys:", shortcut_row)
         
         layout.addLayout(self.form)
-
-    def _add_section_header(self, text):
-        lbl = QLabel(text)
+        self.adjustSize()
+        
+    def _create_entity_combo(self):
+        """Create a combobox configured for long entity IDs, preventing layout clipping."""
+        combo = QComboBox()
+        combo.setEditable(True)
+        combo.setMaxVisibleItems(15)
+        combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        combo.setMinimumContentsLength(10)
+        return combo
+        
+    def _add_section_header(self, title):
+        lbl = QLabel(title)
         lbl.setObjectName("sectionHeader")
         self.form.addRow(lbl)
         return lbl
 
     def populate_entities(self):
         """Fill entity dropdown based on the selected button type."""
-        # Save current selection to restore it later
-        current_entity = self.entity_combo.currentText()
+        # Check if printer combos exist yet (populate_entities can be called
+        # during setup_ui before they are created)
+        has_printer_combos = hasattr(self, 'printer_state_combo')
         
+        # Save current selections (entity IDs) to restore later
+        current_entity = self._get_combo_entity_id(self.entity_combo)
+        current_printer_ids = {}
+        if has_printer_combos:
+            current_printer_ids = {
+                'state': self._get_combo_entity_id(self.printer_state_combo),
+                'camera': self._get_combo_entity_id(self.printer_camera_combo),
+                'nozzle': self._get_combo_entity_id(self.printer_nozzle_combo),
+                'bed': self._get_combo_entity_id(self.printer_bed_combo),
+                'nozzle_target': self._get_combo_entity_id(self.printer_nozzle_target_combo),
+                'bed_target': self._get_combo_entity_id(self.printer_bed_target_combo),
+                'pause': self._get_combo_entity_id(self.printer_pause_combo),
+                'stop': self._get_combo_entity_id(self.printer_stop_combo),
+            }
+        
+        # Clear all combos
         self.entity_combo.clear()
+        if has_printer_combos:
+            self.printer_state_combo.clear()
+            self.printer_camera_combo.clear()
+            self.printer_nozzle_combo.clear()
+            self.printer_bed_combo.clear()
+            self.printer_nozzle_target_combo.clear()
+            self.printer_bed_target_combo.clear()
+            self.printer_pause_combo.clear()
+            self.printer_stop_combo.clear()
+        
         if not self.entities: return
         
         # Determine allowed domains based on selected type
@@ -466,25 +518,91 @@ class ButtonEditWidget(QWidget):
             
             if domain not in domains: domains[domain] = []
             domains[domain].append((eid, friendly))
-            
+        
+        show_friendly = ButtonEditWidget._global_show_friendly_names # Use class-level variable
+        
         for domain in sorted(domains.keys()):
             for eid, friendly in sorted(domains[domain], key=lambda x: x[0]):
-                 self.entity_combo.addItem(eid, friendly)
-                 self.entity_combo.setItemData(self.entity_combo.count()-1, friendly, Qt.ItemDataRole.ToolTipRole)
+                 # Display text depends on toggle; UserRole always stores entity_id
+                 display = friendly if show_friendly else eid
+                 tooltip = f"{friendly} ({eid})" if show_friendly else f"{eid} ({friendly})"
                  
-                 # Also populate the 3D printer specific combos
-                 self.printer_state_combo.addItem(eid, friendly)
-                 self.printer_camera_combo.addItem(eid, friendly)
-                 self.printer_nozzle_combo.addItem(eid, friendly)
-                 self.printer_bed_combo.addItem(eid, friendly)
-                 self.printer_nozzle_target_combo.addItem(eid, friendly)
-                 self.printer_bed_target_combo.addItem(eid, friendly)
+                 self.entity_combo.addItem(display, eid)
+                 self.entity_combo.setItemData(self.entity_combo.count()-1, tooltip, Qt.ItemDataRole.ToolTipRole)
+                 
+                 # All entities (unfiltered) go to printer combos
+                 # They get populated with the full set in a separate pass below
         
-        # Try to restore previous selection
-        if current_entity:
-            idx = self.entity_combo.findText(current_entity)
-            if idx >= 0:
-                self.entity_combo.setCurrentIndex(idx)
+        # Populate printer combos with ALL entities (unfiltered)
+        if has_printer_combos:
+            all_domains = {}
+            for entity in self.entities:
+                eid = entity.get('entity_id', '')
+                domain = eid.split('.')[0] if '.' in eid else 'other'
+                friendly = entity.get('attributes', {}).get('friendly_name', eid)
+                if domain not in all_domains: all_domains[domain] = []
+                all_domains[domain].append((eid, friendly))
+            
+            printer_combos = [
+                self.printer_state_combo, self.printer_camera_combo,
+                self.printer_nozzle_combo, self.printer_bed_combo,
+                self.printer_nozzle_target_combo, self.printer_bed_target_combo,
+                self.printer_pause_combo, self.printer_stop_combo
+            ]
+            for domain in sorted(all_domains.keys()):
+                for eid, friendly in sorted(all_domains[domain], key=lambda x: x[0]):
+                    display = friendly if show_friendly else eid
+                    tooltip = f"{friendly} ({eid})" if show_friendly else f"{eid} ({friendly})"
+                    for combo in printer_combos:
+                        combo.addItem(display, eid)
+                        combo.setItemData(combo.count()-1, tooltip, Qt.ItemDataRole.ToolTipRole)
+        
+        # Restore previous selections by entity ID
+        self._restore_combo_selection(self.entity_combo, current_entity)
+        if has_printer_combos and current_printer_ids:
+            self._restore_combo_selection(self.printer_state_combo, current_printer_ids.get('state', ''))
+            self._restore_combo_selection(self.printer_camera_combo, current_printer_ids.get('camera', ''))
+            self._restore_combo_selection(self.printer_nozzle_combo, current_printer_ids.get('nozzle', ''))
+            self._restore_combo_selection(self.printer_bed_combo, current_printer_ids.get('bed', ''))
+            self._restore_combo_selection(self.printer_nozzle_target_combo, current_printer_ids.get('nozzle_target', ''))
+            self._restore_combo_selection(self.printer_bed_target_combo, current_printer_ids.get('bed_target', ''))
+            self._restore_combo_selection(self.printer_pause_combo, current_printer_ids.get('pause', ''))
+            self._restore_combo_selection(self.printer_stop_combo, current_printer_ids.get('stop', ''))
+    
+    def _get_combo_entity_id(self, combo):
+        """Get the entity ID from a combo, whether from userData or typed text."""
+        # If the user has typed nothing or it is cleared, return empty
+        text = combo.currentText().strip()
+        if not text:
+            return ""
+            
+        # If it matches an item, return its data
+        idx = combo.findText(text)
+        if idx >= 0:
+            return combo.itemData(idx)
+            
+        # Fallback: user typed a custom entity ID
+        return text
+    
+    def _restore_combo_selection(self, combo, entity_id):
+        """Restore a combo's selection by entity ID (stored in UserRole)."""
+        if not entity_id:
+            combo.setCurrentIndex(-1)
+            combo.setCurrentText("")
+            return
+        # Search UserRole data for the entity_id
+        for i in range(combo.count()):
+            if combo.itemData(i) == entity_id:
+                combo.setCurrentIndex(i)
+                return
+        # Not found in list — set as typed text (custom entity)
+        combo.setCurrentText(entity_id)
+    
+    def _toggle_entity_display(self):
+        """Toggle between friendly name and entity ID display in all combos."""
+        ButtonEditWidget._global_show_friendly_names = not ButtonEditWidget._global_show_friendly_names
+        self.friendly_toggle_btn.setText("Show IDs" if ButtonEditWidget._global_show_friendly_names else "Show Names")
+        self.populate_entities()
 
     def on_type_changed(self, index):
         current_type = self.TYPE_DEFINITIONS[index][1] if 0 <= index < len(self.TYPE_DEFINITIONS) else 'switch'
@@ -529,11 +647,14 @@ class ButtonEditWidget(QWidget):
         self.printer_bed_combo.setVisible(is_printer)
         self.printer_bed_target_label.setVisible(is_printer)
         self.printer_bed_target_combo.setVisible(is_printer)
+        self.printer_pause_label.setVisible(is_printer)
+        self.printer_pause_combo.setVisible(is_printer)
+        self.printer_stop_label.setVisible(is_printer)
+        self.printer_stop_combo.setVisible(is_printer)
         
         # Hide standard entity picker if 3D printer
         self.entity_combo.setVisible(not is_printer)
-        if self.form.labelForField(self.entity_combo):
-            self.form.labelForField(self.entity_combo).setVisible(not is_printer)
+        self.form.labelForField(self.entity_combo).setVisible(not is_printer)
         
         # Disable appearance section for camera (no icon/color needed)
         self._set_appearance_enabled(not is_camera)
@@ -621,10 +742,7 @@ class ButtonEditWidget(QWidget):
         
         eid = self.config.get('entity_id', '')
         if eid:
-            self.entity_combo.setCurrentText(eid)
-            # Try to match in combo
-            idx = self.entity_combo.findText(eid)
-            if idx >= 0: self.entity_combo.setCurrentIndex(idx)
+            self._restore_combo_selection(self.entity_combo, eid)
             
         service = self.config.get('service', 'toggle')
         svc_name = service.split('.')[-1]
@@ -657,25 +775,14 @@ class ButtonEditWidget(QWidget):
             self.lock_action_combo.setCurrentIndex(0) # Toggle
             
         # 3D Printer Settings
-        state_eid = self.config.get('printer_state_entity', '')
-        if state_eid:
-            self.printer_state_combo.setCurrentText(state_eid)
-        camera_eid = self.config.get('printer_camera_entity', '')
-        if camera_eid:
-            self.printer_camera_combo.setCurrentText(camera_eid)
-        nozzle_eid = self.config.get('printer_nozzle_entity', '')
-        if nozzle_eid:
-            self.printer_nozzle_combo.setCurrentText(nozzle_eid)
-        nozzle_target_eid = self.config.get('printer_nozzle_target_entity', '')
-        if nozzle_target_eid:
-            self.printer_nozzle_target_combo.setCurrentText(nozzle_target_eid)
-            
-        bed_eid = self.config.get('printer_bed_entity', '')
-        if bed_eid:
-            self.printer_bed_combo.setCurrentText(bed_eid)
-        bed_target_eid = self.config.get('printer_bed_target_entity', '')
-        if bed_target_eid:
-            self.printer_bed_target_combo.setCurrentText(bed_target_eid)
+        self._restore_combo_selection(self.printer_state_combo, self.config.get('printer_state_entity', ''))
+        self._restore_combo_selection(self.printer_camera_combo, self.config.get('printer_camera_entity', ''))
+        self._restore_combo_selection(self.printer_nozzle_combo, self.config.get('printer_nozzle_entity', ''))
+        self._restore_combo_selection(self.printer_nozzle_target_combo, self.config.get('printer_nozzle_target_entity', ''))
+        self._restore_combo_selection(self.printer_bed_combo, self.config.get('printer_bed_entity', ''))
+        self._restore_combo_selection(self.printer_bed_target_combo, self.config.get('printer_bed_target_entity', ''))
+        self._restore_combo_selection(self.printer_pause_combo, self.config.get('printer_pause_entity', ''))
+        self._restore_combo_selection(self.printer_stop_combo, self.config.get('printer_stop_entity', ''))
         
         self.select_color(self.config.get('color', '#4285F4'))
         
@@ -705,9 +812,8 @@ class ButtonEditWidget(QWidget):
         type_idx = self.type_combo.currentIndex()
         new_config['type'] = self.TYPE_DEFINITIONS[type_idx][1] if 0 <= type_idx < len(self.TYPE_DEFINITIONS) else 'switch'
         
-        # Extract ID from entity_id (e.g., "light.kitchen_light (Kitchen Light)" -> "light.kitchen_light")
-        entity_text = self.entity_combo.currentText()
-        new_config['entity_id'] = entity_text.split(" ")[0] if entity_text else ""
+        # Get entity_id from combo data (UserRole), fallback to typed text
+        new_config['entity_id'] = self._get_combo_entity_id(self.entity_combo)
         
         if new_config['type'] == 'climate':
             # Clean up deprecated legacy key for backwards compatibility
@@ -740,12 +846,14 @@ class ButtonEditWidget(QWidget):
             else: new_config['action'] = 'toggle'
             
         if new_config['type'] == '3d_printer':
-            new_config['printer_state_entity'] = self.printer_state_combo.currentText().split(" ")[0]
-            new_config['printer_camera_entity'] = self.printer_camera_combo.currentText().split(" ")[0]
-            new_config['printer_nozzle_entity'] = self.printer_nozzle_combo.currentText().split(" ")[0]
-            new_config['printer_nozzle_target_entity'] = self.printer_nozzle_target_combo.currentText().split(" ")[0]
-            new_config['printer_bed_entity'] = self.printer_bed_combo.currentText().split(" ")[0]
-            new_config['printer_bed_target_entity'] = self.printer_bed_target_combo.currentText().split(" ")[0]
+            new_config['printer_state_entity'] = self._get_combo_entity_id(self.printer_state_combo)
+            new_config['printer_camera_entity'] = self._get_combo_entity_id(self.printer_camera_combo)
+            new_config['printer_nozzle_entity'] = self._get_combo_entity_id(self.printer_nozzle_combo)
+            new_config['printer_nozzle_target_entity'] = self._get_combo_entity_id(self.printer_nozzle_target_combo)
+            new_config['printer_bed_entity'] = self._get_combo_entity_id(self.printer_bed_combo)
+            new_config['printer_bed_target_entity'] = self._get_combo_entity_id(self.printer_bed_target_combo)
+            new_config['printer_pause_entity'] = self._get_combo_entity_id(self.printer_pause_combo)
+            new_config['printer_stop_entity'] = self._get_combo_entity_id(self.printer_stop_combo)
             # Override standard entity_id with state entity for generic handling if needed
             new_config['entity_id'] = new_config['printer_state_entity']
         

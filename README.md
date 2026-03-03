@@ -116,6 +116,3 @@ python3 build_appimage.py
 ```
 
 This will build the binary, create an AppDir, and package it into an AppImage.
-
-## License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

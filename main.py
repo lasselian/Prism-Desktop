@@ -4,6 +4,7 @@ Main entry point and application controller.
 """
 
 import sys
+import os
 import json
 import time
 import asyncio
@@ -12,6 +13,12 @@ from typing import Optional
 import logging
 import copy
 import platform
+
+# Force XWayland on Wayland sessions — Qt's QWidget.move() is silently ignored
+# under native Wayland, causing the dashboard to appear centered instead of
+# anchored to the system tray corner. Must be set before QApplication is created.
+if os.environ.get('XDG_SESSION_TYPE') == 'wayland':
+    os.environ['QT_QPA_PLATFORM'] = 'xcb'
 
 # Configure Logging
 logging.basicConfig(
@@ -44,6 +51,15 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtCore import QUrl
 
 VERSION = "1.3"
+
+def _create_task_safe(coro):
+    """Schedule an async task safely from synchronous Qt context.
+    
+    Defers asyncio.create_task() to the next event-loop iteration via
+    QTimer.singleShot(0, ...) to avoid re-entrant qasync timer-callback
+    assertions (affects distro-packaged qasync on Raspbian/Pi 5).
+    """
+    QTimer.singleShot(0, lambda: asyncio.create_task(coro))
 
 class PrismDesktopApp(QObject):
     """Main application controller."""
@@ -185,7 +201,7 @@ class PrismDesktopApp(QObject):
         # Subscribe to configured entities
         for btn in self.config.get('buttons', []):
             if btn.get('type') == '3d_printer':
-                for key in ['printer_state_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'entity_id']:
+                for key in ['printer_state_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'printer_pause_entity', 'printer_stop_entity', 'entity_id']:
                     eid = btn.get(key)
                     if eid:
                         self._ha_websocket.subscribe_entity(eid)
@@ -241,7 +257,7 @@ class PrismDesktopApp(QObject):
         
         # Async cleanup
         if self.ha_client:
-            asyncio.create_task(self.ha_client.close())
+            _create_task_safe(self.ha_client.close())
             
     async def _camera_refresh_loop(self):
         """Background task to refresh camera images."""
@@ -328,7 +344,7 @@ class PrismDesktopApp(QObject):
     def on_settings_saved(self, new_config: dict):
         """Handle settings saved. Re-initialize if necessary."""
         # Use asyncio task to handle re-init which might involve network operations
-        asyncio.create_task(self._process_settings_change(new_config))
+        _create_task_safe(self._process_settings_change(new_config))
 
     async def _process_settings_change(self, new_config):
         print("Settings saved, reinitializing...")
@@ -375,7 +391,7 @@ class PrismDesktopApp(QObject):
     @pyqtSlot(int)
     def on_edit_button_requested(self, slot: int):
         # Async fetch entities
-        asyncio.create_task(self._async_open_editor(slot))
+        _create_task_safe(self._async_open_editor(slot))
         
     async def _async_open_editor(self, slot: int):
         print(f"Fetching entities for slot {slot}...")
@@ -425,17 +441,17 @@ class PrismDesktopApp(QObject):
             
         # Update subscriptions
         if new_config.get('type') == '3d_printer' and self._ha_websocket:
-            for key in ['printer_state_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'entity_id']:
+            for key in ['printer_state_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'printer_pause_entity', 'printer_stop_entity', 'entity_id']:
                 eid = new_config.get(key)
                 if eid:
                     self._ha_websocket.subscribe_entity(eid)
-                    asyncio.create_task(self._fetch_single_state(eid))
+                    _create_task_safe(self._fetch_single_state(eid))
         else:
             entity_id = new_config.get('entity_id')
             if entity_id and self._ha_websocket:
                 self._ha_websocket.subscribe_entity(entity_id)
                 # Fetch immediate state
-                asyncio.create_task(self._fetch_single_state(entity_id))
+                _create_task_safe(self._fetch_single_state(entity_id))
 
     @pyqtSlot(int)
     def on_duplicate_button_requested(self, slot: int):
@@ -468,7 +484,7 @@ class PrismDesktopApp(QObject):
         
         if self._ha_websocket:
             if new_config.get('type') == '3d_printer':
-                for key in ['printer_state_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'entity_id']:
+                for key in ['printer_state_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'printer_pause_entity', 'printer_stop_entity', 'entity_id']:
                     eid = new_config.get(key)
                     if eid:
                         self._ha_websocket.subscribe_entity(eid)
@@ -540,11 +556,11 @@ class PrismDesktopApp(QObject):
     
     @pyqtSlot(dict)
     def on_button_clicked(self, config):
-        asyncio.create_task(self.service_dispatcher.handle_button_click(config))
+        _create_task_safe(self.service_dispatcher.handle_button_click(config))
 
     @pyqtSlot(str, float)
     def on_volume_scroll(self, entity_id, volume):
-        asyncio.create_task(self.service_dispatcher.handle_volume_scroll(entity_id, volume))
+        _create_task_safe(self.service_dispatcher.handle_volume_scroll(entity_id, volume))
 
     @pyqtSlot(int, str)
     def on_media_command(self, slot, command):
@@ -555,13 +571,13 @@ class PrismDesktopApp(QObject):
         col = slot % cols
         btn = next((b for b in buttons if b.get('row') == row and b.get('col') == col), None)
         if btn and btn.get('entity_id'):
-            asyncio.create_task(self.service_dispatcher.handle_media_command(
+            _create_task_safe(self.service_dispatcher.handle_media_command(
                 btn['entity_id'], command
             ))
 
     @pyqtSlot(int, QRect, dict)
     def on_weather_forecast_requested(self, slot: int, rect: QRect, config: dict):
-        asyncio.create_task(self._async_fetch_and_show_weather(slot, rect, config))
+        _create_task_safe(self._async_fetch_and_show_weather(slot, rect, config))
         
     async def _async_fetch_and_show_weather(self, slot: int, rect: QRect, config: dict):
         entity_id = config.get('entity_id')
@@ -588,12 +604,12 @@ class PrismDesktopApp(QObject):
             
             # Check for camera image
             if entity_id.startswith('camera.'):
-                asyncio.create_task(self._fetch_camera_image(entity_id))
+                _create_task_safe(self._fetch_camera_image(entity_id))
             
             # Check for album art
             pic_path = new_state.get('attributes', {}).get('entity_picture')
             if pic_path:
-                asyncio.create_task(self._fetch_album_art(entity_id, new_state))
+                _create_task_safe(self._fetch_album_art(entity_id, new_state))
             elif new_state.get('attributes', {}).get('media_content_type'):
                 # Is media player but no picture -> Clear it
                 # We only clear if it's actually a media player (has content type or state)
@@ -618,13 +634,13 @@ class PrismDesktopApp(QObject):
         print(f"WS Error: {error}")
 
     def fetch_initial_states(self):
-        asyncio.create_task(self._async_fetch_initial_states())
+        _create_task_safe(self._async_fetch_initial_states())
 
     async def _async_fetch_initial_states(self):
         entity_ids = []
         for b in self.config.get('buttons', []):
             if b.get('type') == '3d_printer':
-                for key in ['printer_state_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'entity_id']:
+                for key in ['printer_state_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'printer_pause_entity', 'printer_stop_entity', 'entity_id']:
                     if b.get(key):
                         entity_ids.append(b.get(key))
             else:

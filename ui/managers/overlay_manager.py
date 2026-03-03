@@ -717,23 +717,22 @@ class OverlayManager(QObject):
         )
 
     def on_printer_action(self, action: str):
-        if not self._active_printer_entity: return
+        if not self._active_printer_config: return
         
-        if action == 'pause':
-            self.service_request.emit({
-                "service": "button.press",
-                "entity_id": f"button.{self._active_printer_entity.split('.')[1]}_pause_print"
-            })
-        elif action == 'resume':
-            self.service_request.emit({
-                "service": "button.press",
-                "entity_id": f"button.{self._active_printer_entity.split('.')[1]}_resume_print"
-            })
+        if action in ('pause', 'resume'):
+            entity = self._active_printer_config.get('printer_pause_entity')
+            if entity:
+                self.service_request.emit({
+                    "service": "button.press",
+                    "entity_id": entity
+                })
         elif action == 'stop':
-            self.service_request.emit({
-                "service": "button.press",
-                "entity_id": f"button.{self._active_printer_entity.split('.')[1]}_stop_print"
-            })
+            entity = self._active_printer_config.get('printer_stop_entity')
+            if entity:
+                self.service_request.emit({
+                    "service": "button.press",
+                    "entity_id": entity
+                })
 
     def on_printer_finished(self):
         self._active_printer_entity = None
