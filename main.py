@@ -618,7 +618,7 @@ class PrismDesktopApp(QObject):
                 
     @pyqtSlot(str, str)
     def on_notification(self, title, message):
-        self.notification_manager.show_notification(title, message)
+        self.notification_manager.show_ha_notification(title, message)
     
     @pyqtSlot()
     def on_ws_connected(self):
