@@ -308,6 +308,10 @@ class ButtonEditWidget(QWidget):
         self.printer_state_combo = self._create_entity_combo()
         self.form.addRow(self.printer_state_label, self.printer_state_combo)
         
+        self.printer_progress_label = QLabel("Progress Entity:")
+        self.printer_progress_combo = self._create_entity_combo()
+        self.form.addRow(self.printer_progress_label, self.printer_progress_combo)
+        
         self.printer_camera_label = QLabel("Camera Entity:")
         self.printer_camera_combo = self._create_entity_combo()
         self.form.addRow(self.printer_camera_label, self.printer_camera_combo)
@@ -461,6 +465,7 @@ class ButtonEditWidget(QWidget):
         if has_printer_combos:
             current_printer_ids = {
                 'state': self._get_combo_entity_id(self.printer_state_combo),
+                'progress': self._get_combo_entity_id(self.printer_progress_combo),
                 'camera': self._get_combo_entity_id(self.printer_camera_combo),
                 'nozzle': self._get_combo_entity_id(self.printer_nozzle_combo),
                 'bed': self._get_combo_entity_id(self.printer_bed_combo),
@@ -474,6 +479,7 @@ class ButtonEditWidget(QWidget):
         self.entity_combo.clear()
         if has_printer_combos:
             self.printer_state_combo.clear()
+            self.printer_progress_combo.clear()
             self.printer_camera_combo.clear()
             self.printer_nozzle_combo.clear()
             self.printer_bed_combo.clear()
@@ -544,7 +550,8 @@ class ButtonEditWidget(QWidget):
                 all_domains[domain].append((eid, friendly))
             
             printer_combos = [
-                self.printer_state_combo, self.printer_camera_combo,
+                self.printer_state_combo, self.printer_progress_combo,
+                self.printer_camera_combo,
                 self.printer_nozzle_combo, self.printer_bed_combo,
                 self.printer_nozzle_target_combo, self.printer_bed_target_combo,
                 self.printer_pause_combo, self.printer_stop_combo
@@ -561,6 +568,7 @@ class ButtonEditWidget(QWidget):
         self._restore_combo_selection(self.entity_combo, current_entity)
         if has_printer_combos and current_printer_ids:
             self._restore_combo_selection(self.printer_state_combo, current_printer_ids.get('state', ''))
+            self._restore_combo_selection(self.printer_progress_combo, current_printer_ids.get('progress', ''))
             self._restore_combo_selection(self.printer_camera_combo, current_printer_ids.get('camera', ''))
             self._restore_combo_selection(self.printer_nozzle_combo, current_printer_ids.get('nozzle', ''))
             self._restore_combo_selection(self.printer_bed_combo, current_printer_ids.get('bed', ''))
@@ -637,6 +645,8 @@ class ButtonEditWidget(QWidget):
         is_printer = current_type == '3d_printer'
         self.printer_state_label.setVisible(is_printer)
         self.printer_state_combo.setVisible(is_printer)
+        self.printer_progress_label.setVisible(is_printer)
+        self.printer_progress_combo.setVisible(is_printer)
         self.printer_camera_label.setVisible(is_printer)
         self.printer_camera_combo.setVisible(is_printer)
         self.printer_nozzle_label.setVisible(is_printer)
@@ -776,6 +786,7 @@ class ButtonEditWidget(QWidget):
             
         # 3D Printer Settings
         self._restore_combo_selection(self.printer_state_combo, self.config.get('printer_state_entity', ''))
+        self._restore_combo_selection(self.printer_progress_combo, self.config.get('printer_progress_entity', ''))
         self._restore_combo_selection(self.printer_camera_combo, self.config.get('printer_camera_entity', ''))
         self._restore_combo_selection(self.printer_nozzle_combo, self.config.get('printer_nozzle_entity', ''))
         self._restore_combo_selection(self.printer_nozzle_target_combo, self.config.get('printer_nozzle_target_entity', ''))
@@ -847,6 +858,7 @@ class ButtonEditWidget(QWidget):
             
         if new_config['type'] == '3d_printer':
             new_config['printer_state_entity'] = self._get_combo_entity_id(self.printer_state_combo)
+            new_config['printer_progress_entity'] = self._get_combo_entity_id(self.printer_progress_combo)
             new_config['printer_camera_entity'] = self._get_combo_entity_id(self.printer_camera_combo)
             new_config['printer_nozzle_entity'] = self._get_combo_entity_id(self.printer_nozzle_combo)
             new_config['printer_nozzle_target_entity'] = self._get_combo_entity_id(self.printer_nozzle_target_combo)

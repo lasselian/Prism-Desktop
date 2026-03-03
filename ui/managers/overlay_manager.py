@@ -123,6 +123,10 @@ class OverlayManager(QObject):
         # Notify active climate overlay
         if self.climate_overlay.isVisible() and self._active_climate_entity == entity_id:
             self.climate_overlay.update_state(state)
+            
+        # Notify active weather overlay
+        if self.weather_overlay.isVisible() and self._active_weather_entity == entity_id:
+            self.weather_overlay.update_state(state)
 
     def update_camera_image(self, entity_id: str, pixmap):
         """Update active overlays with new camera image."""

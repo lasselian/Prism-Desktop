@@ -50,7 +50,7 @@ from PyQt6.QtWidgets import QMessageBox
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtCore import QUrl
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 
 def _create_task_safe(coro):
     """Schedule an async task safely from synchronous Qt context.
@@ -201,7 +201,7 @@ class PrismDesktopApp(QObject):
         # Subscribe to configured entities
         for btn in self.config.get('buttons', []):
             if btn.get('type') == '3d_printer':
-                for key in ['printer_state_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'printer_pause_entity', 'printer_stop_entity', 'entity_id']:
+                for key in ['printer_state_entity', 'printer_progress_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'printer_pause_entity', 'printer_stop_entity', 'entity_id']:
                     eid = btn.get(key)
                     if eid:
                         self._ha_websocket.subscribe_entity(eid)
@@ -441,7 +441,7 @@ class PrismDesktopApp(QObject):
             
         # Update subscriptions
         if new_config.get('type') == '3d_printer' and self._ha_websocket:
-            for key in ['printer_state_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'printer_pause_entity', 'printer_stop_entity', 'entity_id']:
+            for key in ['printer_state_entity', 'printer_progress_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'printer_pause_entity', 'printer_stop_entity', 'entity_id']:
                 eid = new_config.get(key)
                 if eid:
                     self._ha_websocket.subscribe_entity(eid)
@@ -484,7 +484,7 @@ class PrismDesktopApp(QObject):
         
         if self._ha_websocket:
             if new_config.get('type') == '3d_printer':
-                for key in ['printer_state_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'printer_pause_entity', 'printer_stop_entity', 'entity_id']:
+                for key in ['printer_state_entity', 'printer_progress_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'printer_pause_entity', 'printer_stop_entity', 'entity_id']:
                     eid = new_config.get(key)
                     if eid:
                         self._ha_websocket.subscribe_entity(eid)
@@ -640,7 +640,7 @@ class PrismDesktopApp(QObject):
         entity_ids = []
         for b in self.config.get('buttons', []):
             if b.get('type') == '3d_printer':
-                for key in ['printer_state_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'printer_pause_entity', 'printer_stop_entity', 'entity_id']:
+                for key in ['printer_state_entity', 'printer_progress_entity', 'printer_camera_entity', 'printer_nozzle_entity', 'printer_bed_entity', 'printer_nozzle_target_entity', 'printer_bed_target_entity', 'printer_pause_entity', 'printer_stop_entity', 'entity_id']:
                     if b.get(key):
                         entity_ids.append(b.get(key))
             else:

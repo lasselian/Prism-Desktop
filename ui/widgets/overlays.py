@@ -385,6 +385,23 @@ class ClimateOverlay(QWidget):
         
     content_opacity = pyqtProperty(float, get_content_opacity, set_content_opacity)
     
+    def update_state(self, current_state: dict):
+        """Update live state data (modes, fan, current status)."""
+        if not current_state:
+            return
+            
+        self._current_hvac_mode = current_state.get('state', 'off')
+        attrs = current_state.get('attributes', {})
+        self._current_fan_mode = attrs.get('fan_mode', 'auto')
+        
+        if attrs.get('hvac_modes'):
+            self._hvac_modes = attrs.get('hvac_modes')
+        if attrs.get('fan_modes'):
+            # Filter out 'on'/'off' if they are just on/off generic
+            self._fan_modes = attrs.get('fan_modes')
+        
+        self.update()
+
     def start_morph(self, start_geo: QRect, target_geo: QRect, initial_value: float, text: str, 
                    color: QColor = None, base_color: QColor = None,
                    current_state: dict = None):
@@ -405,14 +422,7 @@ class ClimateOverlay(QWidget):
         self._fan_modes = ['auto', 'low', 'medium', 'high'] # Default
         
         if current_state:
-            self._current_hvac_mode = current_state.get('state', 'off')
-            attrs = current_state.get('attributes', {})
-            self._current_fan_mode = attrs.get('fan_mode', 'auto')
-            if attrs.get('hvac_modes'):
-                self._hvac_modes = attrs.get('hvac_modes')
-            if attrs.get('fan_modes'):
-                 # Filter out 'on'/'off' if they are just on/off generic
-                self._fan_modes = attrs.get('fan_modes')
+            self.update_state(current_state)
         
         self._value = initial_value
         self._text = text
@@ -1492,10 +1502,17 @@ class WeatherOverlay(QWidget):
         
     border_progress = pyqtProperty(float, get_border_progress, set_border_progress)
 
+    def update_state(self, current_state: dict):
+        """Update live weather state."""
+        if not current_state:
+            return
+        self._current_state = current_state
+        self.update()
+
     def start_morph(self, start_geo: QRect, target_geo: QRect, current_state: dict, forecasts: list, text: str, color: QColor = None, base_color: QColor = None):
         self._start_geom = start_geo
         self._target_geom = target_geo
-        self._current_state = current_state or {}
+        self.update_state(current_state)
         self._forecasts = forecasts or []
         self._text = text
         self._color = color or QColor("#4285F4")

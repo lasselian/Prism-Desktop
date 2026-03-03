@@ -450,12 +450,21 @@ class DashboardButtonPainter:
             
             # Progress (read from state attributes or secondary entity if configured - sticking to state attributes for simplicity if it's there)
             # Many HA integrations put progress in attributes of the state entity or a dedicated entity.
-            # We will try both: primary state attributes or if user configures separate ones later
+            # Prefer dedicated progress entity if configured
             state_data = dashboard._entity_states.get(cfg.get('printer_state_entity'), {})
             attrs = state_data.get('attributes', {})
-            # Look for common progress attributes
-            progress = attrs.get('progress', attrs.get('job_percentage', 0))
-            if progress is None: progress = 0
+            prog_entity = cfg.get('printer_progress_entity')
+            if prog_entity:
+                prog_data = dashboard._entity_states.get(prog_entity, {})
+                progress = prog_data.get('state', 0)
+            else:
+                # Fall back to common progress attributes on state entity
+                progress = attrs.get('progress', attrs.get('job_percentage', 0))
+            
+            try:
+                progress = float(progress)
+            except (ValueError, TypeError):
+                progress = 0.0
             
             # Nozzle
             nozzle_data = dashboard._entity_states.get(cfg.get('printer_nozzle_entity'), {})
