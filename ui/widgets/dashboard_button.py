@@ -33,6 +33,7 @@ class DashboardButton(QFrame):
     climate_requested = pyqtSignal(int, QRect) # slot, geometry
     weather_requested = pyqtSignal(int, QRect) # slot, geometry
     printer_requested = pyqtSignal(int, QRect, dict) # slot, geometry, config
+    camera_requested = pyqtSignal(int, QRect, dict) # slot, geometry, config
     volume_requested = pyqtSignal(int, QRect) # slot, geometry (for volume overlay)
     volume_scroll = pyqtSignal(str, float) # entity_id, new_volume (for scroll wheel)
     media_command_requested = pyqtSignal(dict)
@@ -61,6 +62,12 @@ class DashboardButton(QFrame):
         self._drag_start_pos = None
         self._is_resizing = False
         self._resize_start_span = (1, 1)
+        
+        # input_number interaction state
+        self._input_changing = False
+        self._input_drag_start_pos = None
+        self._input_start_val = 0.0
+        self._hovering = False
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
         
@@ -73,6 +80,20 @@ class DashboardButton(QFrame):
         self.resize_anim = QPropertyAnimation(self, b"resize_handle_opacity")
         self.resize_anim.setDuration(200) # Fast fade
         self.resize_anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        
+        # Input number blink animation
+        self._input_blink_opacity = 0.0
+        self.input_blink_anim = QPropertyAnimation(self, b"input_blink_opacity")
+        self.input_blink_anim.setDuration(200)
+        self.input_blink_anim.setKeyValueAt(0, 0.0)
+        self.input_blink_anim.setKeyValueAt(0.5, 0.3)
+        self.input_blink_anim.setKeyValueAt(1, 0.0)
+        
+        # Input number arrow hover animation
+        self._arrow_opacity = 0.0
+        self.arrow_anim = QPropertyAnimation(self, b"arrow_opacity")
+        self.arrow_anim.setDuration(200)
+        self.arrow_anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
         
         # Click feedback animation
         self._content_opacity = 0.0
@@ -161,6 +182,24 @@ class DashboardButton(QFrame):
         self.update() 
         
     resize_handle_opacity = pyqtProperty(float, get_resize_handle_opacity, set_resize_handle_opacity)
+    
+    def get_input_blink_opacity(self):
+        return self._input_blink_opacity
+        
+    def set_input_blink_opacity(self, val):
+        self._input_blink_opacity = val
+        self.update()
+        
+    input_blink_opacity = pyqtProperty(float, get_input_blink_opacity, set_input_blink_opacity)
+    
+    def get_arrow_opacity(self):
+        return self._arrow_opacity
+        
+    def set_arrow_opacity(self, val):
+        self._arrow_opacity = val
+        self.update()
+        
+    arrow_opacity = pyqtProperty(float, get_arrow_opacity, set_arrow_opacity)
     
     def get_bounce_offset(self):
         return self._bounce_offset
@@ -291,6 +330,8 @@ class DashboardButton(QFrame):
             self._update_camera_view()
         elif btn_type == '3d_printer':
             self._update_3d_printer_view()
+        elif btn_type == 'input_number':
+            self._update_input_number_view()
         else:
             self._update_default_view(btn_type)
             
@@ -435,6 +476,32 @@ class DashboardButton(QFrame):
         self.value_label.setText(val or "--")
         self.name_label.setText(label)
         self.setProperty("type", "widget")
+        self.value_label.show()
+        self.name_label.show()
+
+    def _update_input_number_view(self):
+        """Update view for input_number entities."""
+        label = self.config.get('label', '')
+        self.value_label.setFont(QFont(SYSTEM_FONT, 18, QFont.Weight.Bold))
+        
+        state_obj = self._value if isinstance(self._value, dict) else {}
+        val = state_obj.get('state', '--')
+        attrs = state_obj.get('attributes', {})
+        unit = attrs.get('unit_of_measurement', '')
+        
+        try:
+            f_val = float(val)
+            step = float(attrs.get('step', 1.0))
+            # Determine precision based on step
+            precision = 0 if step.is_integer() else len(str(step).split('.')[-1])
+            formatted_num = f"{f_val:.{precision}f}"
+            display_val = f"{formatted_num}{unit}"
+        except (ValueError, TypeError):
+            display_val = f"{val}{unit}"
+            
+        self.value_label.setText(display_val)
+        self.name_label.setText(label)
+        self.setProperty("type", "input_number")
         self.value_label.show()
         self.name_label.show()
 
@@ -604,6 +671,12 @@ class DashboardButton(QFrame):
         self.anim.stop()
         self._anim_progress = 0.0
         
+        self.input_blink_anim.stop()
+        self._input_blink_opacity = 0.0
+        
+        self.arrow_anim.stop()
+        self._arrow_opacity = 0.0
+        
         self.pulse_anim.stop()
         self._pulse_opacity = 0.0
         
@@ -652,6 +725,9 @@ class DashboardButton(QFrame):
         elif btn_type == 'weather':
             # Update weather state - pass full object for attributes
             self.set_weather_state(state)
+        elif btn_type == 'input_number':
+            self._value = state
+            self.update_content()
         elif btn_type == 'media_player':
             # Media player gets full state
             self.set_media_state(state)
@@ -880,6 +956,46 @@ class DashboardButton(QFrame):
             else:
                 self._is_resizing = False
                 self._ignore_release = False
+                
+                # Setup input_number drag
+                if self.config and self.config.get('type') == 'input_number':
+                    state_obj = self._value if isinstance(self._value, dict) else {}
+                    try:
+                        self._input_start_val = float(state_obj.get('state', 0.0))
+                        
+                        y_pos = event.pos().y()
+                        x_pos = event.pos().x()
+                        h = self.height()
+                        w = self.width()
+                        
+                        if self.span_y == 1:
+                            if self.span_x == 1:
+                                # 1x1: no click zones, pure drag interaction
+                                pass
+                            else:
+                                # 1x height uses left/right arrows
+                                if x_pos < w * 0.25:
+                                    self._step_input_number(-1) # left = down
+                                    self._ignore_release = True
+                                    return
+                                elif x_pos > w * 0.75:
+                                    self._step_input_number(1) # right = up
+                                    self._ignore_release = True
+                                    return
+                        else:
+                            # 2x+ height uses up/down arrows
+                            if y_pos < h * 0.25:
+                                self._step_input_number(1)
+                                self._ignore_release = True
+                                return
+                            elif y_pos > h * 0.75:
+                                self._step_input_number(-1)
+                                self._ignore_release = True
+                                return
+                            
+                    except (ValueError, TypeError):
+                        pass
+                
                 self._long_press_timer.start()
                 
                 if self.config:
@@ -904,20 +1020,16 @@ class DashboardButton(QFrame):
             # Only trigger if not already at target state or moving towards it.
             
             if in_corner:
-                 if self.resize_anim.endValue() != 1.0 or self.resize_anim.state() == QPropertyAnimation.State.Stopped:
-                     # Only start if we aren't already going to 1.0
-                     if self.resize_anim.endValue() != 1.0:
-                         self.resize_anim.stop()
-                         self.resize_anim.setEndValue(1.0)
-                         self.resize_anim.start()
+                 if self.resize_anim.endValue() != 1.0:
+                     self.resize_anim.stop()
+                     self.resize_anim.setEndValue(1.0)
+                     self.resize_anim.start()
                  self.setCursor(Qt.CursorShape.SizeFDiagCursor)
             else:
-                 if self.resize_anim.endValue() != 0.0 or self.resize_anim.state() == QPropertyAnimation.State.Stopped:
-                     # Only start if we aren't already going to 0.0
-                     if self.resize_anim.endValue() != 0.0:
-                         self.resize_anim.stop()
-                         self.resize_anim.setEndValue(0.0)
-                         self.resize_anim.start()
+                 if self.resize_anim.endValue() != 0.0:
+                     self.resize_anim.stop()
+                     self.resize_anim.setEndValue(0.0)
+                     self.resize_anim.start()
                  self.unsetCursor() # Use unsetCursor to revert to parent/default instead of forcing Hand
         
         if not (event.buttons() & Qt.MouseButton.LeftButton):
@@ -927,6 +1039,53 @@ class DashboardButton(QFrame):
             
         # Prevent dragging "Add" buttons (empty config)
         if not self.config:
+            return
+            
+        # Input Number Drag
+        if self.config.get('type') == 'input_number' and not self._is_resizing and not self._ignore_release:
+            current_global_pos = event.globalPosition().toPoint()
+            
+            # Allow both horizontal and vertical scrubbing
+            dy = self._drag_start_pos.y() - current_global_pos.y() # Invert: drag up = positive
+            dx = current_global_pos.x() - self._drag_start_pos.x() # Right = positive
+            
+            # Use whichever delta is larger
+            delta = dy if abs(dy) > abs(dx) else dx
+            
+            if not self._input_changing and max(abs(dx), abs(dy)) > QApplication.startDragDistance():
+                self._input_changing = True
+                self._long_press_timer.stop()
+                
+                if hasattr(self, 'bounce_anim') and self._bounce_offset > 0:
+                    self.bounce_anim.stop()
+                    self.set_bounce_offset(0.0)
+            
+            if self._input_changing:
+                state_obj = self._value if isinstance(self._value, dict) else {}
+                attrs = state_obj.get('attributes', {})
+                try:
+                    step = float(attrs.get('step', 1.0))
+                    min_val = float(attrs.get('min', 0.0))
+                    max_val = float(attrs.get('max', 100.0))
+                    
+                    # 1 step per 15 pixels dragged
+                    steps = int(delta / 15.0)
+                    new_val = self._input_start_val + (steps * step)
+                    new_val = max(min_val, min(max_val, new_val))
+                    
+                    current_val = float(state_obj.get('state', 0.0))
+                    if abs(new_val - current_val) > 0.0001: # Check if actually changed
+                        # Update local state
+                        new_state_obj = dict(state_obj)
+                        new_state_obj['state'] = str(new_val)
+                        self._value = new_state_obj
+                        self.update_content()
+                        
+                        # Trigger blink
+                        self.input_blink_anim.stop()
+                        self.input_blink_anim.start()
+                except (ValueError, TypeError):
+                    pass
             return
             
         # Resize Logic
@@ -1003,9 +1162,23 @@ class DashboardButton(QFrame):
             self.bounce_anim.start()
         
         if self._ignore_release:
-            # Long press consumed the event
+            # Long press or arrow click consumed the event
             self._ignore_release = False
             self._drag_start_pos = None
+            self._input_changing = False
+            return
+
+        # Handle input_number release
+        if self.config and self.config.get('type') == 'input_number' and self._input_changing:
+            self._input_changing = False
+            self._drag_start_pos = None
+            state_obj = self._value if isinstance(self._value, dict) else {}
+            try:
+                final_val = float(state_obj.get('state', 0.0))
+                # Emit a media_command_requested style dict but for input_number
+                self.clicked.emit({**self.config, 'action': 'set_input_number', 'value': final_val})
+            except (ValueError, TypeError):
+                pass
             return
 
         # Handle resize release
@@ -1082,8 +1255,9 @@ class DashboardButton(QFrame):
                  rect = QRect(global_pos, self.size())
                  self.weather_requested.emit(self.slot, rect)
              elif self.config and self.config.get('type') == 'camera':
-                 # Camera buttons have no click action
-                 pass
+                 global_pos = self.mapToGlobal(QPoint(0,0))
+                 rect = QRect(global_pos, self.size())
+                 self.camera_requested.emit(self.slot, rect, self.config)
              elif self.config and self.config.get('type') == '3d_printer':
                  global_pos = self.mapToGlobal(QPoint(0,0))
                  rect = QRect(global_pos, self.size())
@@ -1096,6 +1270,64 @@ class DashboardButton(QFrame):
                  self.clicked.emit(self.config)
         self._drag_start_pos = None
         super().mouseReleaseEvent(event)
+
+    def _step_input_number(self, direction: int):
+        """Step the input number up (1) or down (-1) and trigger API call."""
+        state_obj = self._value if isinstance(self._value, dict) else {}
+        attrs = state_obj.get('attributes', {})
+        try:
+            current_val = float(state_obj.get('state', 0.0))
+            step = float(attrs.get('step', 1.0))
+            min_val = float(attrs.get('min', 0.0))
+            max_val = float(attrs.get('max', 100.0))
+            
+            new_val = current_val + (direction * step)
+            new_val = max(min_val, min(max_val, new_val))
+            
+            if abs(new_val - current_val) > 0.0001:
+                # Update local state
+                new_state_obj = dict(state_obj)
+                new_state_obj['state'] = str(new_val)
+                self._value = new_state_obj
+                self.update_content()
+                
+                # Trigger blink
+                self.input_blink_anim.stop()
+                self.input_blink_anim.start()
+                
+                # Emit API call
+                self.clicked.emit({**self.config, 'action': 'set_input_number', 'value': new_val})
+        except (ValueError, TypeError):
+            pass
+
+    def _step_input_number(self, direction: int):
+        """Step the input number up (1) or down (-1) and trigger API call."""
+        state_obj = self._value if isinstance(self._value, dict) else {}
+        attrs = state_obj.get('attributes', {})
+        try:
+            current_val = float(state_obj.get('state', 0.0))
+            step = float(attrs.get('step', 1.0))
+            min_val = float(attrs.get('min', 0.0))
+            max_val = float(attrs.get('max', 100.0))
+            
+            new_val = current_val + (direction * step)
+            new_val = max(min_val, min(max_val, new_val))
+            
+            if abs(new_val - current_val) > 0.0001:
+                # Update local state
+                new_state_obj = dict(state_obj)
+                new_state_obj['state'] = str(new_val)
+                self._value = new_state_obj
+                self.update_content()
+                
+                # Trigger blink
+                self.input_blink_anim.stop()
+                self.input_blink_anim.start()
+                
+                # Emit API call
+                self.clicked.emit({**self.config, 'action': 'set_input_number', 'value': new_val})
+        except (ValueError, TypeError):
+            pass
 
     def wheelEvent(self, event):
         """Handle scroll wheel for media player volume."""
@@ -1116,6 +1348,14 @@ class DashboardButton(QFrame):
 
     def leaveEvent(self, event):
         """Reset handle when mouse leaves."""
+        self._hovering = False
+        if self.config and self.config.get('type') == 'input_number':
+            if self.arrow_anim.state() == QPropertyAnimation.State.Running or self._arrow_opacity > 0.0:
+                self.arrow_anim.stop()
+                self.arrow_anim.setEndValue(0.0)
+                self.arrow_anim.start()
+            self.update()
+            
         if hasattr(self, 'bounce_anim') and self._bounce_offset > 0:
             self.bounce_anim.stop()
             self.bounce_anim.setDuration(300)
@@ -1123,15 +1363,23 @@ class DashboardButton(QFrame):
             self.bounce_anim.setEndValue(0.0)
             self.bounce_anim.start()
 
-        if self._resize_handle_opacity > 0.0:
+        if self.resize_anim.state() == QPropertyAnimation.State.Running or self._resize_handle_opacity > 0.0:
             self.resize_anim.stop()
             self.resize_anim.setEndValue(0.0)
             self.resize_anim.start()
-            self.unsetCursor()
+        self.unsetCursor()
         super().leaveEvent(event)
 
     def enterEvent(self, event):
         """Check resize handle on re-entry (e.g. after drop)."""
+        self._hovering = True
+        if self.config and self.config.get('type') == 'input_number':
+            if self._arrow_opacity < 1.0:
+                self.arrow_anim.stop()
+                self.arrow_anim.setEndValue(1.0)
+                self.arrow_anim.start()
+            self.update()
+            
         # We need to check if mouse is already in the corner
         pos = self.mapFromGlobal(QCursor.pos())
         rect = self.rect()

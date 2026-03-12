@@ -3,11 +3,25 @@ from PyQt6.QtCore import (
     Qt, pyqtSignal, QPropertyAnimation, QEasingCurve, pyqtProperty, QRect, QPoint, QPointF, QRectF, QTimer
 )
 from PyQt6.QtGui import (
-    QColor, QFont, QFontMetrics, QPainter, QBrush, QPen, QLinearGradient, QConicalGradient, QPainterPath
+    QColor, QFont, QFontMetrics, QPainter, QBrush, QPen, QLinearGradient, QConicalGradient, QPainterPath, QPixmap
 )
 from ui.icons import get_icon, get_mdi_font, Icons
 from core.utils import SYSTEM_FONT
 from ui.widgets.dashboard_button_painter import DashboardButtonPainter
+
+# ── Shared Overlay Animation Constants ──────────────────────────────
+MORPH_OPEN_DURATION   = 400                          # ms – expand from button
+MORPH_OPEN_EASING     = QEasingCurve.Type.OutCubic
+MORPH_CLOSE_DURATION  = 400                          # ms – shrink back to button
+MORPH_CLOSE_EASING    = QEasingCurve.Type.InOutCubic
+CLOSE_FADE_EXPONENT   = 0.5                          # painter opacity = progress ** this
+CLOSE_FADE_START      = 0.35                          # start fading when progress drops below this
+BORDER_SPIN_DURATION  = 1300                         # ms – rainbow/aurora border animation
+BORDER_SPIN_EASING    = QEasingCurve.Type.InOutQuad
+CONTENT_FADE_DURATION = 300                          # ms – content fade-in after open
+CONTENT_FADE_EASING   = QEasingCurve.Type.OutQuad
+OVERLAY_CORNER_RADIUS = 12                           # px – rounded rect radius
+# ────────────────────────────────────────────────────────────────────
 
 class DimmerOverlay(QWidget):
     """
@@ -32,15 +46,15 @@ class DimmerOverlay(QWidget):
         # Animation
         self._morph_progress = 0.0
         self.anim = QPropertyAnimation(self, b"morph_progress")
-        self.anim.setDuration(350) 
-        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic) 
+        self.anim.setDuration(MORPH_OPEN_DURATION)
+        self.anim.setEasingCurve(MORPH_OPEN_EASING)
         self.anim.finished.connect(self.on_anim_finished)
 
         # Border Spin Animation (Rainbow)
         self._border_progress = 0.0
         self.anim_border = QPropertyAnimation(self, b"border_progress")
-        self.anim_border.setDuration(1500)
-        self.anim_border.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        self.anim_border.setDuration(BORDER_SPIN_DURATION)
+        self.anim_border.setEasingCurve(BORDER_SPIN_EASING)
         
         self._is_closing = False
         self._border_effect = 'Rainbow'
@@ -120,6 +134,8 @@ class DimmerOverlay(QWidget):
         self.releaseMouse()
         
         self.anim.stop()
+        self.anim.setDuration(MORPH_CLOSE_DURATION)
+        self.anim.setEasingCurve(MORPH_CLOSE_EASING)
         self.anim.setStartValue(self._morph_progress)
         self.anim.setEndValue(0.0)
         self.anim.start()
@@ -162,12 +178,18 @@ class DimmerOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
+        # Fade out entire overlay during close for seamless transition
+        if self._is_closing:
+            if self._morph_progress < CLOSE_FADE_START:
+                t = self._morph_progress / CLOSE_FADE_START
+                painter.setOpacity(t ** CLOSE_FADE_EXPONENT)
+        
         rect = self.rect()
         
         # Background - Use base color to match button
         painter.setBrush(self._base_color)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(rect, 12, 12)
+        painter.drawRoundedRect(rect, OVERLAY_CORNER_RADIUS, OVERLAY_CORNER_RADIUS)
         
         if self._is_closing:
              pass
@@ -187,7 +209,7 @@ class DimmerOverlay(QWidget):
             
             # Clip to rounded rect
             path = QPainterPath()
-            path.addRoundedRect(QRectF(rect), 12, 12)
+            path.addRoundedRect(QRectF(rect), OVERLAY_CORNER_RADIUS, OVERLAY_CORNER_RADIUS)
             painter.setClipPath(path)
             
             painter.drawRect(fill_rect)
@@ -274,7 +296,7 @@ class DimmerOverlay(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         
         border_rect = QRectF(rect).adjusted(1, 1, -1, -1)
-        painter.drawRoundedRect(border_rect, 12, 12)
+        painter.drawRoundedRect(border_rect, OVERLAY_CORNER_RADIUS, OVERLAY_CORNER_RADIUS)
 
 
 class ClimateOverlay(QWidget):
@@ -311,15 +333,15 @@ class ClimateOverlay(QWidget):
         # Animation
         self._morph_progress = 0.0
         self.anim = QPropertyAnimation(self, b"morph_progress")
-        self.anim.setDuration(350)
-        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.anim.setDuration(MORPH_OPEN_DURATION)
+        self.anim.setEasingCurve(MORPH_OPEN_EASING)
         self.anim.finished.connect(self.on_anim_finished)
         
         # Border Spin Animation (Rainbow)
         self._border_progress = 0.0
         self.anim_border = QPropertyAnimation(self, b"border_progress")
-        self.anim_border.setDuration(1500)
-        self.anim_border.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        self.anim_border.setDuration(BORDER_SPIN_DURATION)
+        self.anim_border.setEasingCurve(BORDER_SPIN_EASING)
         
         self._border_effect = 'Rainbow'
         
@@ -412,8 +434,8 @@ class ClimateOverlay(QWidget):
         # Content Fade Animation Logic
         self._content_opacity = 0.0
         self.content_anim = QPropertyAnimation(self, b"content_opacity")
-        self.content_anim.setDuration(300)
-        self.content_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        self.content_anim.setDuration(CONTENT_FADE_DURATION)
+        self.content_anim.setEasingCurve(CONTENT_FADE_EASING)
         self.content_anim.setStartValue(0.0)
         self.content_anim.setEndValue(1.0)
         
@@ -455,6 +477,8 @@ class ClimateOverlay(QWidget):
         self.update()
         
         self.anim.stop()
+        self.anim.setDuration(MORPH_CLOSE_DURATION)
+        self.anim.setEasingCurve(MORPH_CLOSE_EASING)
         self.anim.setStartValue(self._morph_progress)
         self.anim.setEndValue(0.0)
         self.anim.start()
@@ -506,12 +530,18 @@ class ClimateOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
+        # Fade out entire overlay during close for seamless transition
+        if self._is_closing:
+            if self._morph_progress < CLOSE_FADE_START:
+                t = self._morph_progress / CLOSE_FADE_START
+                painter.setOpacity(t ** CLOSE_FADE_EXPONENT)
+        
         rect = self.rect()
         
         # Background
         painter.setBrush(self._base_color)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(rect, 12, 12)
+        painter.drawRoundedRect(rect, OVERLAY_CORNER_RADIUS, OVERLAY_CORNER_RADIUS)
         
         # Apply the shared glass edge effect (vignette + specular highlight)
         DashboardButtonPainter.draw_image_edge_effects(painter, QRectF(rect), is_top_clamped=False)
@@ -914,7 +944,7 @@ class ClimateOverlay(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         
         border_rect = QRectF(rect).adjusted(1, 1, -1, -1)
-        painter.drawRoundedRect(border_rect, 12, 12)
+        painter.drawRoundedRect(border_rect, OVERLAY_CORNER_RADIUS, OVERLAY_CORNER_RADIUS)
 class PrinterOverlay(QWidget):
     """
     Overlay for 3D Printer telemetry and controls.
@@ -952,22 +982,22 @@ class PrinterOverlay(QWidget):
         # Animation
         self._morph_progress = 0.0
         self.anim = QPropertyAnimation(self, b"morph_progress")
-        self.anim.setDuration(350)
-        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.anim.setDuration(MORPH_OPEN_DURATION)
+        self.anim.setEasingCurve(MORPH_OPEN_EASING)
         self.anim.finished.connect(self.on_anim_finished)
         
         # Border Spin Animation (Rainbow)
         self._border_progress = 0.0
         self.anim_border = QPropertyAnimation(self, b"border_progress")
-        self.anim_border.setDuration(1500)
-        self.anim_border.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        self.anim_border.setDuration(BORDER_SPIN_DURATION)
+        self.anim_border.setEasingCurve(BORDER_SPIN_EASING)
         self._border_effect = 'Rainbow'
         
         # Content Fade
         self._content_opacity = 0.0
         self.content_anim = QPropertyAnimation(self, b"content_opacity")
-        self.content_anim.setDuration(300)
-        self.content_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        self.content_anim.setDuration(CONTENT_FADE_DURATION)
+        self.content_anim.setEasingCurve(CONTENT_FADE_EASING)
         
         self._is_closing = False
         self._start_geom = QRect()
@@ -1095,6 +1125,8 @@ class PrinterOverlay(QWidget):
         self.update()
         
         self.anim.stop()
+        self.anim.setDuration(MORPH_CLOSE_DURATION)
+        self.anim.setEasingCurve(MORPH_CLOSE_EASING)
         self.anim.setStartValue(self._morph_progress)
         self.anim.setEndValue(0.0)
         self.anim.start()
@@ -1142,11 +1174,18 @@ class PrinterOverlay(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Fade out entire overlay during close for seamless transition
+        if self._is_closing:
+            if self._morph_progress < CLOSE_FADE_START:
+                t = self._morph_progress / CLOSE_FADE_START
+                painter.setOpacity(t ** CLOSE_FADE_EXPONENT)
+        
         rect = self.rect()
         
         painter.setBrush(self._base_color)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(rect, 12, 12)
+        painter.drawRoundedRect(rect, OVERLAY_CORNER_RADIUS, OVERLAY_CORNER_RADIUS)
         
         DashboardButtonPainter.draw_image_edge_effects(painter, QRectF(rect), is_top_clamped=False)
         
@@ -1434,21 +1473,21 @@ class WeatherOverlay(QWidget):
         # Animation
         self._morph_progress = 0.0
         self.anim = QPropertyAnimation(self, b"morph_progress")
-        self.anim.setDuration(350)
-        self.anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.anim.setDuration(MORPH_OPEN_DURATION)
+        self.anim.setEasingCurve(MORPH_OPEN_EASING)
         self.anim.finished.connect(self.on_anim_finished)
         
         # Content Fade Animation
         self._content_opacity = 0.0
         self.content_anim = QPropertyAnimation(self, b"content_opacity")
-        self.content_anim.setDuration(300)
-        self.content_anim.setEasingCurve(QEasingCurve.Type.OutQuad)
+        self.content_anim.setDuration(CONTENT_FADE_DURATION)
+        self.content_anim.setEasingCurve(CONTENT_FADE_EASING)
         
         # Border Spin Animation
         self._border_progress = 0.0
         self.anim_border = QPropertyAnimation(self, b"border_progress")
-        self.anim_border.setDuration(1500)
-        self.anim_border.setEasingCurve(QEasingCurve.Type.InOutQuad)
+        self.anim_border.setDuration(BORDER_SPIN_DURATION)
+        self.anim_border.setEasingCurve(BORDER_SPIN_EASING)
         
         self._border_effect = 'Rainbow'
         self._is_closing = False
@@ -1544,6 +1583,8 @@ class WeatherOverlay(QWidget):
         self.update()
         
         self.anim.stop()
+        self.anim.setDuration(MORPH_CLOSE_DURATION)
+        self.anim.setEasingCurve(MORPH_CLOSE_EASING)
         self.anim.setStartValue(self._morph_progress)
         self.anim.setEndValue(0.0)
         self.anim.start()
@@ -1625,12 +1666,18 @@ class WeatherOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
+        # Fade out entire overlay during close for seamless transition
+        if self._is_closing:
+            if self._morph_progress < CLOSE_FADE_START:
+                t = self._morph_progress / CLOSE_FADE_START
+                painter.setOpacity(t ** CLOSE_FADE_EXPONENT)
+        
         rect = self.rect()
         
         # Background
         painter.setBrush(self._base_color)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawRoundedRect(rect, 12, 12)
+        painter.drawRoundedRect(rect, OVERLAY_CORNER_RADIUS, OVERLAY_CORNER_RADIUS)
         
         DashboardButtonPainter.draw_image_edge_effects(painter, QRectF(rect), is_top_clamped=False)
         
@@ -1758,3 +1805,271 @@ class WeatherOverlay(QWidget):
                     painter.setFont(QFont(SYSTEM_FONT, 9, QFont.Weight.Medium))
                     painter.setPen(self._fg_color(int(alpha * 0.4)))
                     painter.drawText(QRect(fx, fy + 68, item_w, 16), Qt.AlignmentFlag.AlignCenter, f"{low}{unit}")
+
+class CameraOverlay(QWidget):
+    """
+    Dynamic overlay for full camera view.
+    """
+    finished = pyqtSignal()
+    morph_changed = pyqtSignal(float)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.raise_()
+        self.hide()
+        
+        self._camera_pixmap = None
+        self._text = "Camera"
+        self._base_color = QColor("#2d2d2d")
+        
+        self._morph_progress = 0.0
+        self.anim = QPropertyAnimation(self, b"morph_progress")
+        self.anim.setDuration(MORPH_OPEN_DURATION)
+        self.anim.setEasingCurve(MORPH_OPEN_EASING)
+        self.anim.finished.connect(self.on_anim_finished)
+        
+        self._border_progress = 0.0
+        self.anim_border = QPropertyAnimation(self, b"border_progress")
+        self.anim_border.setDuration(BORDER_SPIN_DURATION)
+        self.anim_border.setEasingCurve(BORDER_SPIN_EASING)
+        
+        self._border_effect = 'Rainbow'
+        
+        self._is_closing = False
+        self._start_geom = QRect()
+        self._target_geom = QRect()
+        
+        self._btn_close = QRect()
+
+    def _is_light_bg(self):
+        c = self._base_color
+        lum = 0.2126 * c.red() + 0.7152 * c.green() + 0.0722 * c.blue()
+        return lum > 140
+
+    def _fg_color(self, alpha=255):
+        if self._is_light_bg():
+            return QColor(0, 0, 0, alpha)
+        return QColor(255, 255, 255, alpha)
+
+    def get_morph_progress(self):
+        return self._morph_progress
+        
+    def set_morph_progress(self, val):
+        self._morph_progress = val
+        self.morph_changed.emit(val)
+        
+        current_rect = QRect(
+            int(self._start_geom.x() + (self._target_geom.x() - self._start_geom.x()) * val),
+            int(self._start_geom.y() + (self._target_geom.y() - self._start_geom.y()) * val),
+            int(self._start_geom.width() + (self._target_geom.width() - self._start_geom.width()) * val),
+            int(self._start_geom.height() + (self._target_geom.height() - self._start_geom.height()) * val)
+        )
+        self.setGeometry(current_rect)
+        self.update()
+        
+    morph_progress = pyqtProperty(float, get_morph_progress, set_morph_progress)
+
+    def get_border_progress(self):
+        return self._border_progress
+        
+    def set_border_progress(self, val):
+        self._border_progress = val
+        self.update()
+        
+    border_progress = pyqtProperty(float, get_border_progress, set_border_progress)
+
+    def set_camera_pixmap(self, pixmap):
+        self._camera_pixmap = pixmap
+        if self.isVisible():
+            self.update()
+
+    def start_morph(self, start_geo: QRect, target_geo: QRect, text: str, base_color: QColor = None):
+        self._start_geom = start_geo
+        self._target_geom = target_geo
+        self._text = text
+        self._base_color = base_color or QColor("#2d2d2d")
+        self._is_closing = False
+        
+        self.setGeometry(start_geo)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        
+        self.anim.stop()
+        self.anim.setStartValue(0.0)
+        self.anim.setEndValue(1.0)
+        self.anim.start()
+        
+        self.anim_border.stop()
+        self.anim_border.setStartValue(0.0)
+        self.anim_border.setEndValue(1.0)
+        self.anim_border.start()
+
+    def close_morph(self):
+        self._is_closing = True
+        
+        self.anim.stop()
+        self.anim.setDuration(MORPH_CLOSE_DURATION)
+        self.anim.setEasingCurve(MORPH_CLOSE_EASING)
+        self.anim.setStartValue(self._morph_progress)
+        self.anim.setEndValue(0.0)
+        self.anim.start()
+
+    def on_anim_finished(self):
+        if self._is_closing:
+            self.hide()
+            self._camera_pixmap = None
+            self.finished.emit()
+
+    def mousePressEvent(self, event):
+        pos = event.pos()
+        if self._btn_close.contains(pos):
+            self.close_morph()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        if self._is_closing:
+            if self._morph_progress < CLOSE_FADE_START:
+                t = self._morph_progress / CLOSE_FADE_START
+                painter.setOpacity(t ** CLOSE_FADE_EXPONENT)
+        
+        rect = self.rect()
+        
+        painter.setBrush(self._base_color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(rect, OVERLAY_CORNER_RADIUS, OVERLAY_CORNER_RADIUS)
+        
+        bg_pix = None
+        x_bg = 0
+        y_bg = 0
+        
+        if self._camera_pixmap and not self._camera_pixmap.isNull():
+            path = QPainterPath()
+            path.addRoundedRect(QRectF(rect), OVERLAY_CORNER_RADIUS, OVERLAY_CORNER_RADIUS)
+            painter.setClipPath(path)
+            
+            w = rect.width()
+            h = rect.height()
+            
+            # Use KeepAspectRatioByExpanding to match button styling perfectly
+            scaled_cam = self._camera_pixmap.scaled(
+                int(w), int(h),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            x_off = (scaled_cam.width() - w) / 2
+            y_off = (scaled_cam.height() - h) / 2
+            
+            painter.drawPixmap(0, 0, scaled_cam, int(x_off), int(y_off), int(w), int(h))
+            
+            bg_pix = scaled_cam
+            x_bg = int(x_off)
+            y_bg = int(y_off)
+            
+            # Keep clipping active for edge effects
+            # painter.setClipping(False) # REMOVED
+
+        DashboardButtonPainter.draw_image_edge_effects(painter, QRectF(rect), is_top_clamped=False)
+        
+        if self.anim_border.state() == QPropertyAnimation.State.Running:
+            if self._border_effect == 'Rainbow':
+                self._draw_rainbow_border(painter, rect)
+            elif self._border_effect == 'Aurora Borealis':
+                self._draw_aurora_border(painter, rect)
+            elif self._border_effect == 'Prism Shard':
+                self._draw_prism_shard_border(painter, rect)
+            elif self._border_effect == 'Liquid Mercury':
+                self._draw_liquid_mercury_border(painter, rect)
+        
+        rect_int = rect.toRect() if isinstance(rect, QRectF) else rect
+        
+        painter.setOpacity(1.0)
+        
+        alpha = int(255 * (self._morph_progress if not self._is_closing else self._morph_progress))
+        if alpha < 10:
+            return
+            
+        painter.setOpacity(alpha / 255.0)
+            
+        # Determine theme-based colors for solid pills
+        is_light = self._is_light_bg()
+        pill_bg = QColor(255, 255, 255) if is_light else QColor(30, 30, 30)
+        pill_fg = QColor(30, 30, 30) if is_light else QColor(255, 255, 255)
+
+        DashboardButtonPainter._draw_pill_label(
+            painter, rect_int, self._text,
+            background_pixmap=bg_pix,
+            x_off=x_bg, y_off=y_bg,
+            position='top-left',
+            forced_bg_color=pill_bg,
+            forced_text_color=pill_fg
+        )
+        
+        # Align close button dynamically
+        # _draw_pill_label top-left uses: y=12, h=28 -> center y=26
+        close_size = 28
+        close_x = rect_int.width() - close_size - 12
+        close_y = 12
+        self._btn_close = QRect(close_x, close_y, close_size, close_size)
+        
+        close_icon_rect = QRect(close_x, close_y, close_size, close_size)
+        
+        # Solid background for close button
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setBrush(pill_bg)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(QRectF(close_icon_rect), 14, 14)
+        painter.restore()
+            
+        painter.setFont(get_mdi_font(18))
+        painter.setPen(pill_fg)
+        painter.drawText(close_icon_rect, Qt.AlignmentFlag.AlignCenter, get_icon('close'))
+
+    def set_border_effect(self, effect: str):
+        self._border_effect = effect
+        self.update()
+
+    def _draw_rainbow_border(self, painter, rect):
+        colors = ["#4285F4", "#EA4335", "#FBBC05", "#34A853", "#4285F4"]
+        self._draw_gradient_border(painter, rect, colors)
+
+    def _draw_aurora_border(self, painter, rect):
+        colors = ["#00C896", "#0078FF", "#8C00FF", "#0078FF", "#00C896"]
+        self._draw_gradient_border(painter, rect, colors)
+
+    def _draw_prism_shard_border(self, painter, rect):
+        colors = ["#26C6DA", "#EC407A", "#FFCA28", "#CFD8DC", "#26C6DA"]
+        self._draw_gradient_border(painter, rect, colors)
+
+    def _draw_liquid_mercury_border(self, painter, rect):
+        colors = ["#37474F", "#78909C", "#CFD8DC", "#ECEFF1", "#CFD8DC", "#78909C", "#37474F"]
+        self._draw_gradient_border(painter, rect, colors)
+
+    def _draw_gradient_border(self, painter, rect, colors):
+        speed = 0.9 if self._border_effect == 'Prism Shard' else 1.5
+        if self._border_effect == 'Liquid Mercury': speed = 1.2
+        angle = self._border_progress * 360.0 * speed
+        
+        opacity = 1.0
+        if self._border_progress > 0.8:
+            opacity = (1.0 - self._border_progress) / 0.2
+        painter.setOpacity(opacity)
+
+        gradient = QConicalGradient(QPointF(rect.center()), angle)
+        for i, color in enumerate(colors):
+            gradient.setColorAt(i / (len(colors) - 1), QColor(color))
+        
+        pen = QPen()
+        pen.setWidth(2) 
+        pen.setBrush(QBrush(gradient))
+        
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        
+        border_rect = QRectF(rect).adjusted(1, 1, -1, -1)
+        painter.drawRoundedRect(border_rect, OVERLAY_CORNER_RADIUS, OVERLAY_CORNER_RADIUS)

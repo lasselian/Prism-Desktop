@@ -3,7 +3,7 @@ PyQt6-Wayland>=6.6.0; sys_platform == 'linux'
 pystray>=0.19.5
 aiohttp>=3.9.0
 Pillow>=10.0.0
-winotify>=1.1.0; sys_platform == 'win32'
+win11toast>=0.34; sys_platform == 'win32'
 pynput>=1.7.6
 requests>=2.31.0
 keyring>=24.0.0

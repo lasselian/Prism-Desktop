@@ -2,7 +2,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QTimer, QRect, QPoint
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QWidget
 
-from ui.widgets.overlays import DimmerOverlay, ClimateOverlay, PrinterOverlay, WeatherOverlay
+from ui.widgets.overlays import DimmerOverlay, ClimateOverlay, PrinterOverlay, WeatherOverlay, CameraOverlay
 from ui.widgets.dashboard_button import DashboardButton
 from ui.constants import BUTTON_HEIGHT, BUTTON_SPACING
 
@@ -46,6 +46,10 @@ class OverlayManager(QObject):
         self.weather_overlay.finished.connect(self.on_weather_finished)
         self.weather_overlay.morph_changed.connect(self.on_morph_changed)
         
+        self.camera_overlay = CameraOverlay(parent)
+        self.camera_overlay.finished.connect(self.on_camera_finished)
+        self.camera_overlay.morph_changed.connect(self.on_morph_changed)
+        
         # State Tracking
         self._active_dimmer_entity = None
         self._active_dimmer_type = None
@@ -68,6 +72,10 @@ class OverlayManager(QObject):
         self._weather_source_btn = None
         self._weather_siblings = []
         
+        self._active_camera_entity = None
+        self._camera_source_btn = None
+        self._camera_siblings = []
+        
         # Throttling Timers
         self.dimmer_timer = QTimer(self)
         self.dimmer_timer.setInterval(100)
@@ -79,6 +87,7 @@ class OverlayManager(QObject):
         
         self._border_effect = 'Rainbow'
         self._live_dimming = True
+        self._pending_open_action = None
 
     def close_all_overlays(self):
         """Instantly hide any active overlay. Called before navigating away from grid."""
@@ -94,6 +103,80 @@ class OverlayManager(QObject):
         if self.weather_overlay.isVisible():
             self.weather_overlay.hide()
             self.on_weather_finished()
+    def any_overlay_open(self) -> bool:
+        """Return True if any overlay is currently visible."""
+        return (self.dimmer_overlay.isVisible() or 
+                self.climate_overlay.isVisible() or 
+                self.printer_overlay.isVisible() or 
+                self.weather_overlay.isVisible() or 
+                self.camera_overlay.isVisible())
+
+    def close_all_overlays_animated(self):
+        """Trigger close_morph on all visible overlays instead of instant hide."""
+        if self.dimmer_overlay.isVisible() and not getattr(self.dimmer_overlay, '_is_closing', False):
+            self.dimmer_overlay.close_morph()
+        if self.climate_overlay.isVisible() and not getattr(self.climate_overlay, '_is_closing', False):
+            self.climate_overlay.close_morph()
+        if self.printer_overlay.isVisible() and not getattr(self.printer_overlay, '_is_closing', False):
+            self.printer_overlay.close_morph()
+        if self.weather_overlay.isVisible() and not getattr(self.weather_overlay, '_is_closing', False):
+            self.weather_overlay.close_morph()
+        if self.camera_overlay.isVisible() and not getattr(self.camera_overlay, '_is_closing', False):
+            self.camera_overlay.close_morph()
+
+    def _queue_or_start_overlay(self, method, slot, *args):
+        """
+        Check if any overlay is open. If so, animate them closed and queue this method.
+        Returns True if the method was queued or discarded (caller should return), False if safe to run now.
+        """
+        if self.any_overlay_open():
+            active_btn = None
+            if self.dimmer_overlay.isVisible() and not getattr(self.dimmer_overlay, '_is_closing', False):
+                active_btn = self._dimmer_source_btn
+            elif self.climate_overlay.isVisible() and not getattr(self.climate_overlay, '_is_closing', False):
+                active_btn = self._climate_source_btn
+            elif self.printer_overlay.isVisible() and not getattr(self.printer_overlay, '_is_closing', False):
+                active_btn = self._printer_source_btn
+            elif self.weather_overlay.isVisible() and not getattr(self.weather_overlay, '_is_closing', False):
+                active_btn = self._weather_source_btn
+            elif self.camera_overlay.isVisible() and not getattr(self.camera_overlay, '_is_closing', False):
+                active_btn = self._camera_source_btn
+                
+            if active_btn and active_btn.slot == slot:
+                # Toggle off the current overlay, don't reopen
+                self.close_all_overlays_animated()
+                return True
+                
+            self._pending_open_action = lambda: method(slot, *args)
+            self.close_all_overlays_animated()
+            return True
+            
+        return False
+
+    def _check_pending_actions(self):
+        """Run pending open action after overlays finish closing."""
+        if self._pending_open_action and not self.any_overlay_open():
+            action = self._pending_open_action
+            self._pending_open_action = None
+            action()
+
+    def close_all_overlays(self):
+        """Instantly hide any active overlay. Called before navigating away from grid."""
+        if self.dimmer_overlay.isVisible():
+            self.dimmer_overlay.hide()
+            self.on_dimmer_finished()
+        if self.climate_overlay.isVisible():
+            self.climate_overlay.hide()
+            self.on_climate_finished()
+        if self.printer_overlay.isVisible():
+            self.printer_overlay.hide()
+            self.on_printer_finished()
+        if self.weather_overlay.isVisible():
+            self.weather_overlay.hide()
+            self.on_weather_finished()
+        if self.camera_overlay.isVisible():
+            self.camera_overlay.hide()
+            self.on_camera_finished()
 
     def update_buttons(self, buttons: list):
         """Update reference to buttons."""
@@ -115,7 +198,8 @@ class OverlayManager(QObject):
                 cfg.get('printer_nozzle_entity'),
                 cfg.get('printer_nozzle_target_entity'),
                 cfg.get('printer_bed_entity'),
-                cfg.get('printer_bed_target_entity')
+                cfg.get('printer_bed_target_entity'),
+                cfg.get('printer_progress_entity')
             ]
             if entity_id in relevant_entities:
                 self._push_printer_state()
@@ -133,10 +217,12 @@ class OverlayManager(QObject):
         if self.printer_overlay.isVisible() and self._active_printer_config:
             if self._active_printer_config.get('printer_camera_entity') == entity_id:
                 self.printer_overlay.set_camera_pixmap(pixmap)
+        if self.camera_overlay.isVisible() and self._active_camera_entity == entity_id:
+            self.camera_overlay.set_camera_pixmap(pixmap)
 
     def _push_printer_state(self):
         """Consolidate entities into a virtual state for the printer overlay."""
-        if not self._active_printer_config: return
+        if not self._active_printer_config: return None
         
         cfg = self._active_printer_config
         
@@ -172,8 +258,15 @@ class OverlayManager(QObject):
         else:
             attrs['bed_target'] = bed_data.get('attributes', {}).get('target_temperature', bed_data.get('attributes', {}).get('temperature', 0.0))
         
-        # Ensure progress is there (might be in attributes already, but handle mapping)
-        if 'progress' not in attrs:
+        # Ensure progress is there
+        prog_ent = cfg.get('printer_progress_entity')
+        if prog_ent:
+            prog_val = self._entity_states.get(prog_ent, {}).get('state', 0.0)
+            try:
+                attrs['progress'] = float(prog_val)
+            except (ValueError, TypeError):
+                attrs['progress'] = 0.0
+        elif 'progress' not in attrs:
             attrs['progress'] = attrs.get('job_percentage', 0.0)
             
         virtual_state = {
@@ -181,6 +274,7 @@ class OverlayManager(QObject):
             'attributes': attrs
         }
         self.printer_overlay.update_state(virtual_state)
+        return virtual_state
         
     def set_border_effect(self, effect: str):
         self._border_effect = effect
@@ -196,6 +290,9 @@ class OverlayManager(QObject):
 
     def start_dimmer(self, slot: int, global_rect: QRect, config: dict):
         """Start the dimmer morph sequence."""
+        if self._queue_or_start_overlay(self.start_dimmer, slot, global_rect, config):
+            return
+
         if not config: return
         
         entity_id = config.get('entity_id')
@@ -257,6 +354,9 @@ class OverlayManager(QObject):
 
     def start_volume(self, slot: int, global_rect: QRect, config: dict):
         """Start volume slider using dimmer overlay."""
+        if self._queue_or_start_overlay(self.start_volume, slot, global_rect, config):
+            return
+
         if not config: return
         entity_id = config.get('entity_id')
         if not entity_id: return
@@ -327,6 +427,10 @@ class OverlayManager(QObject):
             self._weather_source_btn = source_btn
             source_btn.set_opacity(0.0)
             self._weather_siblings = []
+        elif overlay_type == 'camera':
+            self._camera_source_btn = source_btn
+            source_btn.set_opacity(0.0)
+            self._camera_siblings = []
         else:
             self._dimmer_source_btn = source_btn
             source_btn.set_opacity(0.0)
@@ -397,6 +501,8 @@ class OverlayManager(QObject):
                 self._printer_siblings = filtered_siblings
             elif overlay_type == 'weather':
                 self._weather_siblings = filtered_siblings
+            elif overlay_type == 'camera':
+                self._camera_siblings = filtered_siblings
             else:
                 self._dimmer_siblings = filtered_siblings
                 
@@ -480,12 +586,17 @@ class OverlayManager(QObject):
         if self._dimmer_source_btn:
             self._dimmer_source_btn.set_opacity(1.0)
             self._dimmer_source_btn = None
+            
+        self._check_pending_actions()
 
     # ==========================
     # Climate Logic
     # ==========================
     
     def start_climate(self, slot: int, global_rect: QRect, config: dict):
+        if self._queue_or_start_overlay(self.start_climate, slot, global_rect, config):
+            return
+
         if not config: return
         entity_id = config.get('entity_id')
         if not entity_id: return
@@ -608,6 +719,7 @@ class OverlayManager(QObject):
             self._climate_source_btn = None
             
         self.parent_widget.activateWindow()
+        self._check_pending_actions()
 
     # ==========================
     # Shared
@@ -624,6 +736,22 @@ class OverlayManager(QObject):
             btn.set_opacity(opacity)
         for btn in self._weather_siblings:
             btn.set_opacity(opacity)
+        for btn in self._camera_siblings:
+            btn.set_opacity(opacity)
+        
+        # Fade source button back in during close (overlay fades out, button fades in)
+        source_opacity = 1.0 - progress  # 0→1 as progress goes 1→0
+        if self._dimmer_source_btn and self.dimmer_overlay._is_closing:
+            self._dimmer_source_btn.set_opacity(source_opacity)
+        if self._climate_source_btn and self.climate_overlay._is_closing:
+            self._climate_source_btn.set_opacity(source_opacity)
+        if self._printer_source_btn and self.printer_overlay._is_closing:
+            self._printer_source_btn.set_opacity(source_opacity)
+        if self._weather_source_btn and self.weather_overlay._is_closing:
+            self._weather_source_btn.set_opacity(source_opacity)
+        if self._camera_source_btn and self.camera_overlay._is_closing:
+            self._camera_source_btn.set_opacity(source_opacity)
+        
         self.morph_changed.emit(progress)
 
     # ==========================
@@ -631,6 +759,9 @@ class OverlayManager(QObject):
     # ==========================
 
     def start_printer(self, slot: int, global_rect: QRect, config: dict):
+        if self._queue_or_start_overlay(self.start_printer, slot, global_rect, config):
+            return
+
         if not config: return
         entity_id = config.get('entity_id')
         if not entity_id: return
@@ -641,8 +772,7 @@ class OverlayManager(QObject):
         source_btn = next((b for b in self.buttons if b.slot == slot), None)
         self._printer_source_btn = source_btn
         
-        # Push initial data
-        self._push_printer_state()
+        # Prepare initial data
         
         # Push initial camera if available on button
         if source_btn and hasattr(source_btn, '_last_camera_pixmap') and source_btn._last_camera_pixmap:
@@ -692,26 +822,7 @@ class OverlayManager(QObject):
                     btn.set_opacity(0.0)
 
         # Consolidate entities into a virtual state for the printer overlay
-        cfg = self._active_printer_config
-        state_data = self._entity_states.get(cfg.get('printer_state_entity'), {})
-        primary_state = state_data.get('state', 'unknown')
-        attrs = dict(state_data.get('attributes', {}))
-        
-        noz_data = self._entity_states.get(cfg.get('printer_nozzle_entity'), {})
-        attrs['hotend_actual'] = noz_data.get('attributes', {}).get('actual_temperature', noz_data.get('state', 0.0))
-        attrs['hotend_target'] = noz_data.get('attributes', {}).get('target_temperature', noz_data.get('attributes', {}).get('temperature', 0.0))
-        
-        bed_data = self._entity_states.get(cfg.get('printer_bed_entity'), {})
-        attrs['bed_actual'] = bed_data.get('attributes', {}).get('actual_temperature', bed_data.get('state', 0.0))
-        attrs['bed_target'] = bed_data.get('attributes', {}).get('target_temperature', bed_data.get('attributes', {}).get('temperature', 0.0))
-        
-        if 'progress' not in attrs:
-            attrs['progress'] = attrs.get('job_percentage', 0.0)
-            
-        virtual_state = {
-            'state': primary_state,
-            'attributes': attrs
-        }
+        virtual_state = self._push_printer_state()
         
         self.printer_overlay.set_border_effect(self._border_effect)
         self.printer_overlay.start_morph(
@@ -748,12 +859,16 @@ class OverlayManager(QObject):
             self._printer_source_btn.set_opacity(1.0)
             self._printer_source_btn = None
         self.parent_widget.activateWindow()
+        self._check_pending_actions()
 
     # ==========================
     # Weather Logic
     # ==========================
     
     def start_weather(self, slot: int, global_rect: QRect, config: dict, forecasts: list):
+        if self._queue_or_start_overlay(self.start_weather, slot, global_rect, config, forecasts):
+            return
+
         if not config: return
         entity_id = config.get('entity_id')
         if not entity_id: return
@@ -819,4 +934,112 @@ class OverlayManager(QObject):
             self._weather_source_btn.set_opacity(1.0)
             self._weather_source_btn = None
         self.parent_widget.activateWindow()
+        self._check_pending_actions()
+
+    # ==========================
+    # Camera Logic
+    # ==========================
+    
+    def start_camera(self, slot: int, global_rect: QRect, config: dict):
+        if self._queue_or_start_overlay(self.start_camera, slot, global_rect, config):
+            return
+
+        if not config: return
+        entity_id = config.get('entity_id')
+        if not entity_id: return
+        
+        self._active_camera_entity = entity_id
+        
+        source_btn = next((b for b in self.buttons if b.slot == slot), None)
+        self._camera_source_btn = source_btn
+        
+        if source_btn and hasattr(source_btn, '_last_camera_pixmap') and source_btn._last_camera_pixmap:
+            self.camera_overlay.set_camera_pixmap(source_btn._last_camera_pixmap)
+            
+        if self.theme_manager:
+            base_color = QColor(self.theme_manager.get_colors().get('base', '#2d2d2d'))
+        else:
+            base_color = QColor("#2d2d2d")
+            
+        start_rect = self.parent_widget.mapFromGlobal(global_rect.topLeft())
+        start_rect = QRect(start_rect, global_rect.size())
+        
+        from ui.constants import BUTTON_HEIGHT, BUTTON_SPACING, BUTTON_WIDTH
+        
+        # Calculate max boundaries of the actual grid layout
+        visible_rects = []
+        for btn in self.buttons:
+            if btn.isVisible():
+                pos = btn.mapTo(self.parent_widget, QPoint(0, 0))
+                visible_rects.append(QRect(pos, btn.size()))
+                
+        if visible_rects:
+            grid_min_x = min(r.left() for r in visible_rects)
+            grid_max_x = max(r.right() for r in visible_rects)
+            grid_min_y = min(r.top() for r in visible_rects)
+            grid_max_y = max(r.bottom() for r in visible_rects)
+        else:
+            # Fallback if no layout calculated
+            grid_min_x = start_rect.left()
+            grid_max_x = start_rect.right()
+            grid_min_y = start_rect.top()
+            grid_max_y = start_rect.bottom()
+            
+        avail_w = grid_max_x - grid_min_x + 1
+        avail_h = grid_max_y - grid_min_y + 1
+        
+        max_cols = 4
+        max_rows = 4
+        
+        ideal_w = (BUTTON_WIDTH * max_cols) + (BUTTON_SPACING * (max_cols - 1))
+        ideal_h = (BUTTON_HEIGHT * max_rows) + (BUTTON_SPACING * (max_rows - 1))
+        
+        target_w = min(ideal_w, avail_w)
+        target_h = min(ideal_h, avail_h)
+        
+        # Start at top-left of source button
+        target_x = start_rect.left()
+        target_y = start_rect.top()
+        
+        # Shift left if hanging over the right edge
+        if target_x + target_w > grid_max_x + 1:
+            target_x = grid_max_x - target_w + 1
+            if target_x < grid_min_x:
+                target_x = grid_min_x
+                
+        # Shift up if hanging over the bottom edge
+        if target_y + target_h > grid_max_y + 1:
+            target_y = grid_max_y - target_h + 1
+            if target_y < grid_min_y:
+                target_y = grid_min_y
+
+        target_rect = QRect(target_x, target_y, target_w, target_h)
+        
+        for btn in self.buttons:
+            if not btn.isVisible() or btn == source_btn: continue
+            if btn in self._camera_siblings: continue
+            btn_pos = btn.mapTo(self.parent_widget, QPoint(0, 0))
+            # Create a slight margin logic for intersection, or use the parent rect directly
+            btn_rect = QRect(btn_pos, btn.size())
+            # Use small margins to avoid floating point or off-by-one pixel overlaps causing unintended fade
+            if target_rect.intersects(btn_rect.adjusted(2, 2, -2, -2)):
+                self._camera_siblings.append(btn)
+                btn.set_opacity(0.0)
+                
+        self.camera_overlay.set_border_effect(self._border_effect)
+        label = config.get('label', 'Camera')
+        self.camera_overlay.start_morph(
+            start_rect, target_rect, label, base_color=base_color
+        )
+
+    def on_camera_finished(self):
+        self._active_camera_entity = None
+        for btn in self._camera_siblings:
+            btn.set_opacity(1.0)
+        self._camera_siblings = []
+        if self._camera_source_btn:
+            self._camera_source_btn.set_opacity(1.0)
+            self._camera_source_btn = None
+        self.parent_widget.activateWindow()
+        self._check_pending_actions()
 

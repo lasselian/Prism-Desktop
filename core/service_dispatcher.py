@@ -59,6 +59,10 @@ class ServiceDispatcher:
             state = await self.ha_client.get_state(entity_id)
             current = state.get('state') if state else 'locked'
             service = 'unlock' if current == 'locked' else 'lock'
+        elif config.get('action') == 'set_input_number':
+            domain = 'input_number'
+            service = 'set_value'
+            data = {'value': config.get('value', 0.0)}
             
         await self.ha_client.call_service(domain, service, entity_id, data)
 

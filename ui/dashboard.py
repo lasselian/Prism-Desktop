@@ -37,23 +37,19 @@ from ui.constants import (
     ROOT_MARGIN, RESIZE_MARGIN, calculate_width, calculate_footer_btn_width
 )
 from ui.managers.overlay_manager import OverlayManager
-
-from ui.grid_layout_engine import GridLayoutEngine
+from ui.managers.grid_manager import GridManager, VirtualButton
 from ui.settings_widget import SettingsWidget
 from ui.button_edit_widget import ButtonEditWidget
+from ui.visuals.dashboard_effects import (
+    draw_aurora_border, draw_rainbow_border, draw_prism_shard_border, 
+    draw_liquid_mercury_border, capture_glass_background
+)
 
 
 class FrozenScrollArea(QScrollArea):
     """ScrollArea that disables wheel scrolling."""
     def wheelEvent(self, event):
         event.accept()
-
-class VirtualButton:
-    """Helper for layout engine to track out-of-bounds buttons without consuming a widget."""
-    def __init__(self, config):
-        self.config = config
-        self.span_x = config.get('span_x', 1)
-        self.span_y = config.get('span_y', 1)
 
 class Dashboard(QWidget):
     """Main dashboard popup widget with dynamic grid."""
@@ -119,6 +115,9 @@ class Dashboard(QWidget):
         # Propagate border effect to overlay manager
         self.overlay_manager.set_border_effect(self._border_effect)
         
+        # Grid Manager
+        self.grid_manager = GridManager(self)
+        
         self.setup_ui()
         
         # View switching (Grid vs Settings)
@@ -128,6 +127,7 @@ class Dashboard(QWidget):
         
         # Window Resize Logic
         self.setMouseTracking(True) # Enable hover events for cursor change
+        QApplication.instance().installEventFilter(self)  # Track mouse globally for cursor reset
         self._is_resizing_window = False
         self._resize_mode = None # 'top', 'left', 'top-left'
         self._resize_start_pos = None # Global pos
@@ -361,11 +361,7 @@ class Dashboard(QWidget):
         valid_span_x = min(span_x, max_span_x)
         valid_span_y = min(span_y, max_span_y)
         
-        # Auto-Relocation: Check if expanding would overlap other configured buttons
-        if not hasattr(self, 'layout_engine'):
-            self.layout_engine = GridLayoutEngine(cols=self._cols)
-        
-        relocations = self.layout_engine.find_relocations(
+        relocations = self.grid_manager.layout_engine.find_relocations(
             source_btn, valid_span_x, valid_span_y, self.buttons, self._rows
         )
         
@@ -408,113 +404,11 @@ class Dashboard(QWidget):
 
     def rebuild_grid(self, preview_mode=False, update_height=True):
         """Rebuild the grid using (row, col) based layout."""
-        # 0. Lazy Import / Init Engine
-        if not hasattr(self, 'layout_engine'):
-            self.layout_engine = GridLayoutEngine(cols=self._cols)
-
-        # 1. Clear Grid
-        if not preview_mode:
-            for btn in self.buttons:
-                btn.hide()
-        
-        while self.grid.count():
-            self.grid.takeAt(0)
-            
-        # 2. Calculate Layout
-        # Include virtual (out-of-bounds) buttons so forbidden cells are marked
-        all_buttons = list(self.buttons)
-        if hasattr(self, '_virtual_buttons') and self._virtual_buttons:
-            all_buttons.extend(self._virtual_buttons)
-            
-        placements = self.layout_engine.calculate_layout(all_buttons, self._rows)
-        
-        max_row = 0
-        
-        # 3. Apply Placements
-        for btn, r, c, span_y, span_x in placements:
-            # RESET transient states for empty buttons (fixes stuck "forbidden" icons)
-            if not (btn.config and btn.config.get('entity_id')):
-                 btn.config = {}
-                 btn.update_content()
-                 btn.update_style()
-
-            # Add to grid FIRST to ensure parentage
-            self.grid.addWidget(btn, r, c, span_y, span_x)
-            
-            # Then show
-            btn.setVisible(True)
-            
-            # Reset resize styling if not resizing
-            if not getattr(btn, '_is_resizing', False):
-                btn.resize_handle_opacity = 0.0
-                if hasattr(btn, 'resize_anim'):
-                    btn.resize_anim.stop()
-            
-            # Compute runtime slot for signal/overlay compat
-            new_slot = r * self._cols + c
-            btn.slot = new_slot
-            
-            # Update Config with (row, col) — NOT slot
-            if not preview_mode and btn.config:
-                btn.config['row'] = r
-                btn.config['col'] = c
-                
-            max_row = max(max_row, r + span_y)
-            
-        # 3b. Mark forbidden cells: buttons that are in cells blocked by out-of-bounds configured buttons
-        forbidden_cells = self.layout_engine.get_forbidden_cells()
-        if forbidden_cells:
-            for btn, r, c, span_y, span_x in placements:
-                if (r, c) in forbidden_cells and not (btn.config and btn.config.get('entity_id')):
-                    # This is an empty/add button sitting in a forbidden cell
-                    btn.config = {'type': 'forbidden'}
-                    btn.update_content()
-                    btn.update_style()
-        
-        # 3c. Fix z-order: raise configured buttons above empty/add buttons
-        # Without this, empty buttons in adjacent cells can visually cover
-        # multi-span configured buttons after a resize.
-        for btn, r, c, span_y, span_x in placements:
-            if btn.config and btn.config.get('entity_id'):
-                btn.raise_()
-            
-        # 4. Hide buttons not placed (outside visible grid or conflicting)
-        placed_buttons = set(p[0] for p in placements)
-        for btn in self.buttons:
-            if btn not in placed_buttons:
-                btn.setVisible(False)
-        
-        # 5. Update Height (Only if requested and not previewing)
-        if update_height:
-            grid_h = (self._rows * BUTTON_HEIGHT) + ((self._rows - 1) * BUTTON_SPACING)
-            extras = GRID_MARGIN_TOP + GRID_MARGIN_BOTTOM + FOOTER_HEIGHT + FOOTER_MARGIN_BOTTOM + 20
-            new_height = grid_h + extras
-            
-            start_h = self.height()
-            if start_h != new_height and self._current_view == 'grid':
-                if preview_mode:
-                    self.setFixedSize(self.width(), new_height)
-                    if hasattr(self, '_resize_anchor_y'):
-                        new_y = self._resize_anchor_y - new_height
-                        self.move(self.x(), new_y)
-                else:
-                    # Avoid restarting animation if already running towards target
-                    if self.height_anim.state() == QPropertyAnimation.State.Running and \
-                       abs(self.height_anim.endValue() - new_height) < 1.0:
-                        return
-
-                    self._resize_anchor_y = self.y() + self.height()
-                    self.height_anim.stop()
-                    self.height_anim.setStartValue(float(start_h))
-                    self.height_anim.setEndValue(float(new_height))
-                    self.height_anim.start()
+        self.grid_manager.rebuild_grid(preview_mode=preview_mode, update_height=update_height)
 
     def get_first_empty_slot(self, span_x: int = 1, span_y: int = 1) -> tuple:
         """Find the first visible (row, col) that is completely empty and fits the span."""
-        if not hasattr(self, 'layout_engine'):
-            self.layout_engine = GridLayoutEngine(cols=self._cols)
-            
-        return self.layout_engine.find_first_empty_slot(self.buttons, self._rows, span_x, span_y)
+        return self.grid_manager.layout_engine.find_first_empty_slot(self.buttons, self._rows, span_x, span_y)
             
     def _do_set_rows(self, rows: int):
         """Update grid rows dynamically (Animate First, Rebuild Later)."""
@@ -653,6 +547,7 @@ class Dashboard(QWidget):
         button.dimmer_requested.connect(self._on_dimmer_requested)
         button.climate_requested.connect(self._on_climate_requested)
         button.weather_requested.connect(self._on_weather_requested)
+        button.camera_requested.connect(self._on_camera_requested)
         button.printer_requested.connect(self._on_printer_requested)
         button.volume_requested.connect(self._on_volume_requested)
         button.media_command_requested.connect(self.media_command_requested.emit)
@@ -702,8 +597,7 @@ class Dashboard(QWidget):
             # Always update _cols and _fixed_width immediately so setup_ui uses the right values
             self._cols = cols
             self._fixed_width = calculate_width(cols)
-            if hasattr(self, 'layout_engine'):
-                self.layout_engine.cols = cols
+            self.grid_manager.update_cols(cols)
             
             if self._current_view == 'settings':
                 self._pending_cols = cols
@@ -903,6 +797,7 @@ class Dashboard(QWidget):
             button.dimmer_requested.connect(self._on_dimmer_requested)
             button.climate_requested.connect(self._on_climate_requested)
             button.weather_requested.connect(self._on_weather_requested)
+            button.camera_requested.connect(self._on_camera_requested)
             button.printer_requested.connect(self._on_printer_requested)
             button.volume_requested.connect(self._on_volume_requested)
             button.volume_scroll.connect(self.volume_scroll_requested.emit)
@@ -1190,105 +1085,7 @@ class Dashboard(QWidget):
     
     def set_buttons(self, configs: list[dict], appearance_config: dict = None, update_height=True):
         """Set button configurations using (row, col) based positioning."""
-        self._button_configs = configs
-        if appearance_config:
-            self._live_dimming = True
-            self._border_effect = appearance_config.get('border_effect', 'Rainbow')
-            self._show_dimming = appearance_config.get('show_dimming', False)
-            self._glass_ui = appearance_config.get('glass_ui', False)
-            self._button_style = appearance_config.get('button_style', 'Gradient')
-        
-        # Ensure we have enough button widgets for the visible grid
-        target_slots = self._rows * self._cols
-        while len(self.buttons) < target_slots:
-            button = self._get_button_from_pool(len(self.buttons))
-            self.buttons.append(button)
-            
-        # Clear virtual buttons (prevent stale collisions)
-        self._virtual_buttons = []
-        
-        # Reset all buttons to empty first
-        for button in self.buttons:
-            button.config = {}
-            button.set_spans(1, 1)
-        
-        # Assign configs to buttons
-        # Each config with (row, col) gets assigned to a button widget
-        config_idx = 0
-        for cfg in configs:
-            if not cfg.get('entity_id'):
-                continue
-            
-            # Skip if config is strictly out of bounds
-            # This prevents hidden buttons from consuming widgets, which would starve visible buttons
-            r = cfg.get('row', 0)
-            c = cfg.get('col', 0)
-            sx = cfg.get('span_x', 1)
-            sy = cfg.get('span_y', 1)
-            
-            # Check for partial overlap vs complete miss
-            if c >= self._cols or r >= self._rows:
-                 # Starting position is outside grid -> Completely hidden
-                 continue
-
-            if c + sx > self._cols or r + sy > self._rows:
-                # Partially overlaps visible area -> Track as VirtualButton
-                # This ensures the layout engine knows about it and marks intersecting cells as forbidden
-                if not hasattr(self, '_virtual_buttons'): self._virtual_buttons = []
-                self._virtual_buttons.append(VirtualButton(cfg))
-                continue
-            
-            # Find a free button widget to use for this config
-            if config_idx < len(self.buttons):
-                button = self.buttons[config_idx]
-                config_idx += 1
-                
-                # Reset state if entity changed
-                old_entity = button.config.get('entity_id')
-                new_entity = cfg.get('entity_id')
-                
-                button.config = cfg
-                
-                if old_entity != new_entity:
-                    button.reset_state()
-                    if new_entity and new_entity in self._entity_states:
-                        button.apply_ha_state(self._entity_states[new_entity])
-                
-                button.set_spans(sx, sy)
-                button.update_content()
-                button.button_style = getattr(self, '_button_style', 'Gradient')
-                button.update_style()
-                button.set_border_effect(self._border_effect)
-                button.show_dimming = self._show_dimming
-                
-                # ENSURE connection (fix for missing signal)
-                try:
-                    button.resize_requested.disconnect(self.handle_button_resize)
-                except TypeError:
-                    pass
-                button.resize_requested.connect(self.handle_button_resize)
-                
-                try:
-                    button.resize_finished.disconnect(self.handle_button_resize_finished)
-                except TypeError:
-                    pass
-                button.resize_finished.connect(self.handle_button_resize_finished)
-                
-                try:
-                    button.duplicate_requested.disconnect(self.duplicate_button_requested)
-                except TypeError:
-                    pass
-                button.duplicate_requested.connect(self.duplicate_button_requested)
-        
-        # Remaining buttons are empty "Add" buttons — update their style too
-        for i in range(config_idx, len(self.buttons)):
-            self.buttons[i].update_content()
-            self.buttons[i].button_style = getattr(self, '_button_style', 'Gradient')
-            self.buttons[i].update_style()
-            self.buttons[i].set_border_effect(self._border_effect)
-        
-        # Rebuild grid to properly layout
-        self.rebuild_grid(update_height=update_height)
+        self.grid_manager.set_buttons(configs, appearance_config=appearance_config, update_height=update_height)
 
 
 
@@ -1340,139 +1137,16 @@ class Dashboard(QWidget):
         # Only draw if animating and effect is active
         # Use border_anim state to control drawing duration
         if self.border_anim.state() == QPropertyAnimation.State.Running:
+            rect = QRectF(self.container.geometry()).adjusted(0, 0, 0, 0)
             if self._border_effect == 'Rainbow':
-                self._draw_rainbow_border()
+                draw_rainbow_border(painter, rect, self._border_progress)
             elif self._border_effect == 'Aurora Borealis':
-                self._draw_aurora_border()
+                draw_aurora_border(painter, rect, self._border_progress)
             elif self._border_effect == 'Prism Shard':
-                self._draw_prism_shard_border()
+                draw_prism_shard_border(painter, rect, self._border_progress)
             elif self._border_effect == 'Liquid Mercury':
-                self._draw_liquid_mercury_border()
+                draw_liquid_mercury_border(painter, rect, self._border_progress)
 
-    def _draw_aurora_border(self):
-        """Draw the Aurora Borealis border effect."""
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Angle (Slower spin for aurora?)
-        angle = self._border_progress * 360.0 * 1.0 
-        
-        # Fade out
-        opacity = 1.0
-        if self._border_progress > 0.8:
-            opacity = (1.0 - self._border_progress) / 0.2
-        painter.setOpacity(opacity)
-        
-        rect = QRectF(self.container.geometry()).adjusted(0, 0, 0, 0)
-        
-        # Aurora Colors: Green -> Blue -> Purple -> Blue -> Green
-        colors = ["#00C896", "#0078FF", "#8C00FF", "#0078FF", "#00C896"]
-        
-        gradient = QConicalGradient(rect.center(), angle)
-        for i, color in enumerate(colors):
-            gradient.setColorAt(i / (len(colors) - 1), QColor(color))
-        
-        pen = QPen()
-        pen.setWidth(3)
-        pen.setBrush(QBrush(gradient))
-        
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        
-        painter.drawRoundedRect(rect, 12, 12)
-
-    def _draw_rainbow_border(self):
-        """Draw the rainbow border effect."""
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        # Angle
-        angle = self._border_progress * 360.0 * 1.5
-        
-        # Fade out
-        opacity = 1.0
-        if self._border_progress > 0.8:
-            opacity = (1.0 - self._border_progress) / 0.2
-        painter.setOpacity(opacity)
-        
-        # Use container geometry to ensure tight fit
-        rect = QRectF(self.container.geometry()).adjusted(0, 0, 0, 0)
-        
-        # Colors - Google Brand Colors
-        colors = ["#4285F4", "#EA4335", "#FBBC05", "#34A853", "#4285F4"]
-        
-        gradient = QConicalGradient(rect.center(), angle)
-        for i, color in enumerate(colors):
-            gradient.setColorAt(i / (len(colors) - 1), QColor(color))
-        
-        pen = QPen()
-        pen.setWidth(3)
-        pen.setBrush(QBrush(gradient))
-        
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        
-        painter.drawRoundedRect(rect, 12, 12)
-
-    def _draw_prism_shard_border(self):
-        """Draw the Prism Shard border effect."""
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        angle = self._border_progress * 360.0 * 0.9
-        
-        opacity = 1.0
-        if self._border_progress > 0.8:
-            opacity = (1.0 - self._border_progress) / 0.2
-        painter.setOpacity(opacity)
-        
-        rect = QRectF(self.container.geometry()).adjusted(0, 0, 0, 0)
-        
-        # Muted jewel tones: Muted Cyan -> Muted Magenta -> Muted Yellow -> Blue-Gray
-        colors = ["#26C6DA", "#EC407A", "#FFCA28", "#CFD8DC", "#26C6DA"]
-        
-        gradient = QConicalGradient(rect.center(), angle)
-        for i, color in enumerate(colors):
-            gradient.setColorAt(i / (len(colors) - 1), QColor(color))
-        
-        pen = QPen()
-        pen.setWidth(3)
-        pen.setBrush(QBrush(gradient))
-        
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        
-        painter.drawRoundedRect(rect, 12, 12)
-
-    def _draw_liquid_mercury_border(self):
-        """Draw the Liquid Mercury border effect."""
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        angle = self._border_progress * 360.0 * 1.2
-        
-        opacity = 1.0
-        if self._border_progress > 0.8:
-            opacity = (1.0 - self._border_progress) / 0.2
-        painter.setOpacity(opacity)
-        
-        rect = QRectF(self.container.geometry()).adjusted(0, 0, 0, 0)
-        
-        # Gunmetal Chrome palette
-        colors = ["#37474F", "#78909C", "#CFD8DC", "#ECEFF1", "#CFD8DC", "#78909C", "#37474F"]
-        
-        gradient = QConicalGradient(rect.center(), angle)
-        for i, color in enumerate(colors):
-            gradient.setColorAt(i / (len(colors) - 1), QColor(color))
-        
-        pen = QPen()
-        pen.setWidth(3)
-        pen.setBrush(QBrush(gradient))
-        
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        
-        painter.drawRoundedRect(rect, 12, 12)
             
     def _on_dimmer_requested(self, slot: int, rect: QRect):
         config = self._get_button_config(slot)
@@ -1500,6 +1174,9 @@ class Dashboard(QWidget):
 
     def _on_printer_requested(self, slot: int, rect: QRect, config: dict):
         self.overlay_manager.start_printer(slot, rect, config)
+
+    def _on_camera_requested(self, slot: int, rect: QRect, config: dict):
+        self.overlay_manager.start_camera(slot, rect, config)
 
     def _get_button_config(self, slot: int):
         row = slot // self._cols
@@ -1576,58 +1253,7 @@ class Dashboard(QWidget):
     def on_theme_changed(self, theme: str):
         self.update_style()
     
-    def _capture_glass_background(self, target_height: int = None):
-        """Capture and blur the desktop area behind the window for frosted glass."""
-        if not self._glass_ui:
-            self._glass_bg_pixmap = None
-            return
-        
-        screen = QApplication.primaryScreen()
-        if not screen:
-            self._glass_bg_pixmap = None
-            return
-        
-        # Geometry logic
-        c_x = self.container.x()
-        c_w = self.container.width()
-        
-        screen_geo = screen.geometry()
-        
-        # Capture the entire vertical column for this window to avoid needing
-        # to recapture when animating height changes, which caused the UI itself to get captured.
-        grab_x = self.x() + c_x
-        grab_y = screen_geo.y()
-        grab_w = c_w
-        grab_h = screen_geo.height()
-        
-        # Safety: ensure valid dimensions
-        if grab_w <= 0: grab_w = self.width() - 20
-        if grab_w <= 0: grab_w = 100 # Fallback
-        if grab_h <= 0: grab_h = 1080 # Fallback
-        
-        # Grab the screen region
-        desktop_pixmap = screen.grabWindow(0, int(grab_x), int(grab_y), int(grab_w), int(grab_h))
-        
-        if desktop_pixmap.isNull():
-            self._glass_bg_pixmap = None
-            return
-        
-        # Apply downscale → upscale blur (same technique as label pill)
-        blur_factor = 0.06  # Very heavy blur
-        small = desktop_pixmap.scaled(
-            max(1, int(grab_w * blur_factor)),
-            max(1, int(grab_h * blur_factor)),
-            Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        blurred = small.scaled(
-            int(grab_w), int(grab_h),
-            Qt.AspectRatioMode.IgnoreAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        
-        self._glass_bg_pixmap = blurred
-        self._glass_capture_pos = QPoint(int(grab_x), int(grab_y))
+
     
     def show_near_tray(self):
         """Position and show the dashboard near the system tray."""
@@ -1652,7 +1278,7 @@ class Dashboard(QWidget):
         if self._glass_ui:
             # Position the window first so geometry is correct for capture
             self.move(target_x, target_y)
-            self._capture_glass_background()
+            self._glass_bg_pixmap, self._glass_capture_pos = capture_glass_background(self)
         
         # Ensure we are visible before animating
         super().show()
@@ -2218,14 +1844,27 @@ class Dashboard(QWidget):
         """Reset cursor when mouse leaves window."""
         # Only reset if not currently dragging
         if not self._is_resizing_window:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.unsetCursor()
         super().leaveEvent(event)
+
+    def eventFilter(self, obj, event):
+        """App-level event filter to reset resize cursor when mouse moves over child widgets."""
+        from PyQt6.QtCore import QEvent
+        if (event.type() == QEvent.Type.MouseMove
+                and not self._is_resizing_window
+                and self._current_view == 'grid'
+                and isinstance(obj, QWidget)
+                and (obj is self or self.isAncestorOf(obj))):
+            pos = self.mapFromGlobal(event.globalPosition().toPoint())
+            if pos.y() >= RESIZE_MARGIN and pos.x() >= RESIZE_MARGIN:
+                self.unsetCursor()
+        return super().eventFilter(obj, event)
 
     def mouseMoveEvent(self, event):
         """Handle resize drag and hover cursor."""
         # Only allow resizing in Grid View
         if self._current_view != 'grid':
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.unsetCursor()
             super().mouseMoveEvent(event)
             return
 
@@ -2239,7 +1878,7 @@ class Dashboard(QWidget):
             elif x < RESIZE_MARGIN:
                 self.setCursor(Qt.CursorShape.SizeHorCursor)
             else:
-                self.setCursor(Qt.CursorShape.ArrowCursor)
+                self.unsetCursor()
             super().mouseMoveEvent(event)
             return
             
@@ -2286,7 +1925,7 @@ class Dashboard(QWidget):
         if self._is_resizing_window:
             self._is_resizing_window = False
             self._resize_mode = None
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.unsetCursor()
             
             # Prevent focus-loss close for a brief moment
             # (In case mouse release happened outside window)

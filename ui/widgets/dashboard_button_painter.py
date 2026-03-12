@@ -29,6 +29,12 @@ class DashboardButtonPainter:
              if hasattr(button, '_cached_display_pixmap') and button._cached_display_pixmap and not button._cached_display_pixmap.isNull():
                  painter = QPainter(button)
                  painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                 
+                 # Ensure clipping even when using cached pixmap (for the edge effects)
+                 path = QPainterPath()
+                 path.addRoundedRect(QRectF(button.rect()), 12, 12)
+                 painter.setClipPath(path)
+                 
                  painter.drawPixmap(0, 0, button._cached_display_pixmap)
                  DashboardButtonPainter.draw_image_edge_effects(painter, QRectF(button.rect()), is_top_clamped=False)
                  painter.end()
@@ -96,6 +102,14 @@ class DashboardButtonPainter:
         # Only draw special border if animating or if progress > 0
         if button.anim.state() == QPropertyAnimation.State.Running or button._anim_progress > 0.0:
             DashboardButtonPainter._paint_border_animation(button)
+            
+        # Draw input_number blink feedback
+        if getattr(button, '_input_blink_opacity', 0.0) > 0.01 and button.config.get('type') == 'input_number':
+            DashboardButtonPainter._paint_input_blink(button)
+            
+        # Draw input_number hover arrows
+        if getattr(button, '_arrow_opacity', 0.0) > 0.01 and button.config.get('type') == 'input_number':
+            DashboardButtonPainter._paint_input_arrows(button)
 
         if not button.config:
             DashboardButtonPainter._paint_empty_slot(button)
@@ -272,64 +286,15 @@ class DashboardButtonPainter:
                 info_pill_path.addRoundedRect(info_pill_rect, 14, 14)
                 
                 if has_art and show_art:
-                    # Blurred art background (same technique as label pill)
-                    pill_src_x = x_off + info_pill_x
-                    pill_src_y = y_off + info_pill_y
-                    valid_src = QRect(int(pill_src_x), int(pill_src_y), int(info_pill_w), int(info_pill_h))
-                    info_pix = scaled.copy(valid_src)
-                    
-                    if not info_pix.isNull():
-                        small = info_pix.scaled(
-                            max(1, int(info_pill_w * 0.1)), max(1, int(info_pill_h * 0.1)),
-                            Qt.AspectRatioMode.IgnoreAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation
-                        )
-                        blurred = small.scaled(
-                            int(info_pill_w), int(info_pill_h),
-                            Qt.AspectRatioMode.IgnoreAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation
-                        )
-                        
-                        # Luminance check
-                        small_img = small.toImage()
-                        r_sum = g_sum = b_sum = count = 0
-                        for sy in range(small_img.height()):
-                            for sx in range(small_img.width()):
-                                pc = small_img.pixelColor(sx, sy)
-                                r_sum += pc.red()
-                                g_sum += pc.green()
-                                b_sum += pc.blue()
-                                count += 1
-                        
-                        avg_lum = 0
-                        if count > 0:
-                            avg_lum = 0.2126 * (r_sum/count) + 0.7152 * (g_sum/count) + 0.0722 * (b_sum/count)
-                        
-                        is_light_bg = avg_lum > 128
-                        if is_light_bg:
-                            info_text_color = QColor(0, 0, 0, 220)
-                            info_border_color = QColor(0, 0, 0, 30)
-                            info_tint = QColor(255, 255, 255, 60)
-                        else:
-                            info_text_color = QColor(255, 255, 255, 240)
-                            info_border_color = QColor(255, 255, 255, 50)
-                            info_tint = QColor(255, 255, 255, 30)
-                        
-                        painter.save()
-                        painter.setClipPath(info_pill_path)
-                        painter.drawPixmap(int(info_pill_x), int(info_pill_y), blurred)
-                        painter.fillPath(info_pill_path, info_tint)
-                        
-                        pen = QPen(info_border_color)
-                        pen.setWidth(1)
-                        painter.setPen(pen)
-                        painter.drawRoundedRect(info_pill_rect, 14, 14)
-                        painter.restore()
-                    else:
-                        info_text_color = QColor(255, 255, 255, 240)
-                        painter.save()
-                        painter.fillPath(info_pill_path, QColor(0, 0, 0, 80))
-                        painter.restore()
+                    # Blurred art background
+                    from ui.utils.glass_effect import draw_frosted_pill
+                    info_text_color = draw_frosted_pill(
+                        painter, 
+                        info_pill_rect, 
+                        background_pixmap=scaled, 
+                        bg_x_offset=x_off, 
+                        bg_y_offset=y_off
+                    )
                 else:
                     # No art fallback
                     info_text_color = QColor(255, 255, 255, 220)
@@ -764,6 +729,69 @@ class DashboardButtonPainter:
         painter.end()
 
     @staticmethod
+    def _paint_input_blink(button):
+        """Draw a quick white flash over the button when value changes."""
+        painter = QPainter(button)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        c = QColor(255, 255, 255)
+        c.setAlphaF(button._input_blink_opacity)
+        
+        painter.setBrush(QBrush(c))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(QRectF(button.rect()), 12, 12)
+        painter.end()
+        
+    @staticmethod
+    def _paint_input_arrows(button):
+        """Draw minimalist up/down arrows on hover."""
+        painter = QPainter(button)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Determine color based on theme
+        if button.theme_manager:
+            colors = button.theme_manager.get_colors()
+            base_text = colors.get('text', '#ffffff')
+            is_light = base_text == '#1e1e1e'
+            c = QColor(0, 0, 0) if is_light else QColor(255, 255, 255)
+        else:
+            c = QColor(255, 255, 255)
+            
+        # Fade opacity
+        c.setAlphaF(getattr(button, '_arrow_opacity', 0.0) * 0.6)
+        painter.setPen(c)
+        rect = button.rect()
+        w, h = rect.width(), rect.height()
+        
+        if button.span_y == 1:
+            if button.span_x == 1:
+                # No arrows for 1x1 layout - relies purely on drag
+                pass
+            else:
+                # Left and right vertical centers
+                font_size = 20 if button.span_x == 1 else 24
+                painter.setFont(get_mdi_font(font_size))
+                
+                padding = 12
+                left_rect = QRectF(padding, 0, w * 0.25, h)
+                painter.drawText(left_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, Icons.CHEVRON_LEFT)
+                
+                right_rect = QRectF(w * 0.75 - padding, 0, w * 0.25, h)
+                painter.drawText(right_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, Icons.CHEVRON_RIGHT)
+        else:
+            painter.setFont(get_mdi_font(24))
+            
+            # Top quarter for Up Arrow
+            up_rect = QRectF(0, 8, w, h * 0.25)
+            painter.drawText(up_rect, Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignTop, Icons.CHEVRON_UP)
+            
+            # Bottom quarter for Down Arrow
+            down_rect = QRectF(0, h * 0.75 - 8, w, h * 0.25)
+            painter.drawText(down_rect, Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignBottom, Icons.CHEVRON_DOWN)
+        
+        painter.end()
+
+    @staticmethod
     def _paint_border_animation(button):
         painter = QPainter(button)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -864,8 +892,8 @@ class DashboardButtonPainter:
         painter.end()
 
     @staticmethod
-    def _draw_pill_label(painter, rect, label, background_pixmap=None, x_off=0, y_off=0, position='top-center'):
-        """Draws a glass/blurred pill label."""
+    def _draw_pill_label(painter, rect, label, background_pixmap=None, x_off=0, y_off=0, position='top-center', forced_bg_color=None, forced_text_color=None):
+        """Draws a pill label (frosted glass by default, or solid if colors provided)."""
         if not label:
             return
 
@@ -912,115 +940,32 @@ class DashboardButtonPainter:
             
         pill_rect = QRectF(pill_x, pill_y, pill_w, pill_h)
         
-        # --- Pill Rendering ---
-        # Check 1: Do we have a background pixmap to blur?
-        if background_pixmap and not background_pixmap.isNull():
-            # 1. Access Background (Crop from Scaled Art)
-            # Need to map pill rect to scaled image coordinates
-            # offset in scaled image = x_off, y_off
-            pill_src_x = x_off + pill_x
-            pill_src_y = y_off + pill_y
-            
-            # 2. Create Blurred Pill Background
-            # Crop
-            # Ensure we don't go out of bounds
-            valid_src = QRect(int(pill_src_x), int(pill_src_y), int(pill_w), int(pill_h))
-            pill_pix = background_pixmap.copy(valid_src)
-            
-            if not pill_pix.isNull():
-                # Blur Simulation: Downscale -> Upscale
-                # Downscale factor 0.1 (very small) -> heavy blur
-                small = pill_pix.scaled(
-                    int(pill_w * 0.1), int(pill_h * 0.1),
-                    Qt.AspectRatioMode.IgnoreAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                blurred = small.scaled(
-                    int(pill_w), int(pill_h), 
-                    Qt.AspectRatioMode.IgnoreAspectRatio, 
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                
-                # Calculate Luminance from the small downscaled image (fast)
-                # Convert to QImage to access pixels
-                small_img = small.toImage()
-                
-                # Simple average luminance
-                # We only check a few pixels to be fast (center, corners) or full average?
-                # Full average on 16x3 image is negligible cost.
-                r_sum = 0
-                g_sum = 0
-                b_sum = 0
-                count = 0
-                
-                for y in range(small_img.height()):
-                    for x in range(small_img.width()):
-                        c = small_img.pixelColor(x, y)
-                        r_sum += c.red()
-                        g_sum += c.green()
-                        b_sum += c.blue()
-                        count += 1
-                        
-                avg_lum = 0
-                if count > 0:
-                    # Standard Luminance formula
-                    avg_lum = (0.2126 * (r_sum/count) + 0.7152 * (g_sum/count) + 0.0722 * (b_sum/count))
-                
-                # Determine Theme (Dark vs Light Text)
-                is_light_bg = avg_lum > 128
-                
-                if is_light_bg:
-                    # Light Background -> Dark Text
-                    text_color = QColor(0, 0, 0, 220)
-                    border_color = QColor(0, 0, 0, 30)
-                    tint_color = QColor(255, 255, 255, 60) # Boost brightness slightly
-                else:
-                    # Dark Background -> White Text
-                    text_color = QColor(255, 255, 255, 240)
-                    border_color = QColor(255, 255, 255, 50)
-                    tint_color = QColor(255, 255, 255, 30)
-                    
-                # Draw Blurred Background with Tint
-                painter.save()
-                pill_path = QPainterPath()
-                pill_path.addRoundedRect(pill_rect, 14, 14) # Fully rounded pill
-                painter.setClipPath(pill_path)
-                painter.drawPixmap(int(pill_x), int(pill_y), blurred)
-                painter.fillPath(pill_path, tint_color)
-                
-                # Border
-                pen = QPen(border_color)
-                pen.setWidth(1)
-                painter.setPen(pen)
-                painter.drawRoundedRect(pill_rect, 14, 14)
-                painter.restore()
-                
-                # Text Color
-                painter.setPen(text_color)
-        
-        else:
-            # Fallback Pill (No Artwork -> Idle/Off)
-            # Use semi-transparent background
+        if forced_bg_color:
+            # Draw solid pill
             painter.save()
-            pill_path = QPainterPath()
-            pill_path.addRoundedRect(pill_rect, 14, 14)
-            
-            # Dark semi-transparent pill on solid bg
-            painter.fillPath(pill_path, QColor(0, 0, 0, 60))
-            
-            # Border
-            pen = QPen(QColor(255, 255, 255, 30))
-            pen.setWidth(1)
-            painter.setPen(pen)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setBrush(forced_bg_color)
+            painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(pill_rect, 14, 14)
             painter.restore()
+            text_color = forced_text_color or QColor("white")
+        else:
+            # Draw the frosted background and auto-magically get the correct text color contrast
+            from ui.utils.glass_effect import draw_frosted_pill
             
-            painter.setPen(QColor(255, 255, 255, 220))
+            text_color = draw_frosted_pill(
+                painter, 
+                pill_rect, 
+                background_pixmap=background_pixmap, 
+                bg_x_offset=x_off, 
+                bg_y_offset=y_off
+            )
 
         # Draw Label Text (Final Step)
         # System Font, Bold
         font = QFont(SYSTEM_FONT, 10, QFont.Weight.DemiBold)
         painter.setFont(font)
+        painter.setPen(text_color)
         painter.drawText(pill_rect, Qt.AlignmentFlag.AlignCenter, label.upper())
 
     @staticmethod

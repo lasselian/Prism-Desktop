@@ -92,6 +92,10 @@ class Icons:
     CLOSE = "\U000F0156"               # mdi-close
     POWER = "\U000F0425"               # mdi-power
     POWER_PLUG = "\U000F06A5"          # mdi-power-plug
+    CHEVRON_UP = "\U000F0143"          # mdi-chevron-up
+    CHEVRON_DOWN = "\U000F0140"        # mdi-chevron-down
+    CHEVRON_LEFT = "\U000F0141"        # mdi-chevron-left
+    CHEVRON_RIGHT = "\U000F0142"       # mdi-chevron-right
     
     # Switches
     TOGGLE_SWITCH = "\U000F0521"       # mdi-toggle-switch

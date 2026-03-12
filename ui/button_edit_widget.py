@@ -6,7 +6,7 @@ Embedded Button Editor Widget
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
     QLineEdit, QPushButton, QComboBox, QFormLayout,
-    QCheckBox, QSpinBox, QSizePolicy
+    QCheckBox, QSpinBox, QSizePolicy, QCompleter
 )
 from PyQt6.QtCore import Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QColor, QFont
@@ -24,6 +24,7 @@ class ButtonEditWidget(QWidget):
         ("Climate", "climate"),
         ("Cover", "curtain"),
         ("Fan", "fan"),
+        ("Input Number", "input_number"),
         ("Light / Switch", "switch"),
         ("Lock", "lock"),
         ("Media Player", "media_player"),
@@ -272,14 +273,14 @@ class ButtonEditWidget(QWidget):
         self.service_combo.addItems(["toggle", "turn_on", "turn_off"])
         self.form.addRow(self.service_label, self.service_combo)
         
-        # Camera Display Mode (Camera Only)
-        self.camera_mode_label = QLabel("Display:")
-        self.camera_mode_combo = QComboBox()
-        self.camera_mode_combo.addItems(["Picture", "Live Stream"])
-        self.camera_mode_combo.setToolTip("Picture refreshes periodically, Live Stream is continuous")
-        self.camera_mode_combo.setVisible(False)
-        self.camera_mode_label.setVisible(False)
-        self.form.addRow(self.camera_mode_label, self.camera_mode_combo)
+        # Camera Display Mode (Removed - always stream)
+        # self.camera_mode_label = QLabel("Display:")
+        # self.camera_mode_combo = QComboBox()
+        # self.camera_mode_combo.addItems(["Picture", "Live Stream"])
+        # self.camera_mode_combo.setToolTip("Picture refreshes periodically, Live Stream is continuous")
+        # self.camera_mode_combo.setVisible(False)
+        # self.camera_mode_label.setVisible(False)
+        # self.form.addRow(self.camera_mode_label, self.camera_mode_combo)
         
         # Camera Size (Removed - handled by drag resize)
         # self.camera_size_label = QLabel("Size:")
@@ -445,6 +446,15 @@ class ButtonEditWidget(QWidget):
         combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         combo.setMinimumContentsLength(10)
+        
+        # Configure the completer for partial, case-insensitive substring matching
+        combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        completer = combo.completer()
+        if completer:
+            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+            
         return combo
         
     def _add_section_header(self, title):
@@ -497,7 +507,8 @@ class ButtonEditWidget(QWidget):
         domain_map = {
             'automation': {'automation'},
             'switch': {'light', 'switch', 'input_boolean', 'input_button'},
-            'widget': {'sensor', 'binary_sensor', 'number', 'input_number'},
+            'widget': {'sensor', 'binary_sensor', 'number'},
+            'input_number': {'input_number'},
             'climate': {'climate'},
             'curtain': {'cover'},
             'fan': {'fan'},
@@ -626,10 +637,7 @@ class ButtonEditWidget(QWidget):
         
         # Show camera-specific controls
         is_camera = current_type == 'camera'
-        self.camera_mode_combo.setVisible(is_camera)
-        self.camera_mode_label.setVisible(is_camera)
-        # self.camera_size_combo.setVisible(is_camera)
-        # self.camera_size_label.setVisible(is_camera)
+        # mode combo removed
         
         # Show automation specific controls
         is_automation = current_type == 'automation'
@@ -765,11 +773,9 @@ class ButtonEditWidget(QWidget):
         # Precision
         self.precision_spin.setValue(self.config.get('precision', 1))
         
-        # Camera settings
-        camera_mode = self.config.get('camera_mode', 'picture')
-        self.camera_mode_combo.setCurrentIndex(0 if camera_mode == 'picture' else 1)
-        # Start with default size or existing config, implicit
-        # camera_size = self.config.get('camera_size', 1)
+        # Camera settings (Removed - always stream)
+        # camera_mode = self.config.get('camera_mode', 'picture')
+        # self.camera_mode_combo.setCurrentIndex(0 if camera_mode == 'picture' else 1)
         
         # Automation settings
         automation_action = self.config.get('action', 'toggle')
@@ -840,7 +846,7 @@ class ButtonEditWidget(QWidget):
             new_config['precision'] = self.precision_spin.value()
         
         if new_config['type'] == 'camera':
-            new_config['camera_mode'] = 'picture' if self.camera_mode_combo.currentIndex() == 0 else 'stream'
+            new_config['camera_mode'] = 'stream'
             # Preserve existing size/span if set, otherwise default to 1x1 during creation
             if 'span_x' not in new_config: new_config['span_x'] = 1
             if 'span_y' not in new_config: new_config['span_y'] = 1

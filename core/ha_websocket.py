@@ -20,7 +20,7 @@ class HAWebSocket(QObject):
     connected = pyqtSignal()
     disconnected = pyqtSignal()
     state_changed = pyqtSignal(str, dict)  # entity_id, new_state
-    notification_received = pyqtSignal(str, str)  # title, message
+    notification_received = pyqtSignal(dict)  # full notification payload dict
     error = pyqtSignal(str)
     
     def __init__(self, url: str = "", token: str = ""):
@@ -33,6 +33,8 @@ class HAWebSocket(QObject):
         self._message_id = 0
         self._subscribed_entities: set[str] = set()
         self._config_lock = threading.Lock()
+        self._webhook_id: str = ""  # Set after Mobile App registration
+        self._push_channel_id: int = 0   # WS message ID for push_notification_channel
         self.logger = logging.getLogger(__name__)
     
     def configure(self, url: str, token: str):
@@ -40,6 +42,10 @@ class HAWebSocket(QObject):
         with self._config_lock:
             self.url = url.rstrip('/')
             self.token = token
+
+    def set_webhook_id(self, webhook_id: str):
+        """Set the Mobile App webhook_id for push notification delivery."""
+        self._webhook_id = webhook_id
     
     def subscribe_entity(self, entity_id: str):
         """Add entity to subscription list."""
@@ -110,6 +116,19 @@ class HAWebSocket(QObject):
                 "type": "subscribe_events",
                 "event_type": "call_service"
             })
+
+            # Subscribe to Mobile App push notifications via WebSocket channel
+            # This delivers notify.mobile_app_* calls over the WebSocket instead of HTTP webhook
+            if self._webhook_id:
+                push_id = self._next_id()
+                self._push_channel_id = push_id
+                await self._send({
+                    "id": push_id,
+                    "type": "mobile_app/push_notification_channel",
+                    "webhook_id": self._webhook_id,
+                    "support_confirm": False,
+                })
+                self.logger.info(f"[HAWebSocket] Subscribed to push_notification_channel (id={push_id})")
             
             # Start message loop
             await self._message_loop()
@@ -162,6 +181,20 @@ class HAWebSocket(QObject):
         msg_type = data.get('type', '')
         
         if msg_type == 'event':
+            # Check if this is a push_notification_channel event
+            if self._push_channel_id and data.get('id') == self._push_channel_id:
+                event = data.get('event', {})
+                title = event.get('title', 'Home Assistant')
+                message_text = event.get('message', '')
+                extra = event.get('data', {})
+                if isinstance(extra, dict):
+                    payload = {'title': title, 'message': message_text, **extra}
+                else:
+                    payload = {'title': title, 'message': message_text}
+                if message_text:
+                    self.notification_received.emit(payload)
+                return
+
             event = data.get('event', {})
             event_type = event.get('event_type', '')
             event_data = event.get('data', {})
@@ -178,7 +211,10 @@ class HAWebSocket(QObject):
                         title = attrs.get('title', 'Home Assistant')
                         message = attrs.get('message', new_state.get('state', ''))
                         if message:
-                            self.notification_received.emit(title, message)
+                            self.notification_received.emit({
+                                'title': title,
+                                'message': message,
+                            })
                 
                 # Only emit state changes for subscribed entities or all if none specified
                 if not self._subscribed_entities or entity_id in self._subscribed_entities:
@@ -194,7 +230,10 @@ class HAWebSocket(QObject):
                     title = service_data.get('title', 'Home Assistant')
                     message = service_data.get('message', '')
                     if message:
-                        self.notification_received.emit(title, message)
+                        self.notification_received.emit({
+                            'title': title,
+                            'message': message,
+                        })
     
     async def _cleanup(self):
         """Clean up WebSocket connection."""

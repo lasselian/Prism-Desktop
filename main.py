@@ -44,6 +44,7 @@ from ui.dashboard import Dashboard
 from ui.tray_manager import TrayManager
 from services.notifications import NotificationManager
 from services.input_manager import InputManager
+from services.mobile_app import register_mobile_app
 from ui.icons import load_mdi_font
 from services.update_checker import UpdateCheckerThread
 from PyQt6.QtWidgets import QMessageBox
@@ -74,7 +75,7 @@ class PrismDesktopApp(QObject):
         # Components
         self.theme_manager = ThemeManager()
         self.ha_client = HAClient()
-        self.notification_manager = NotificationManager()
+        self.notification_manager = NotificationManager(ha_client=self.ha_client)
         self.input_manager = InputManager()
         
         # UI Components
@@ -95,7 +96,7 @@ class PrismDesktopApp(QObject):
         self.service_dispatcher = ServiceDispatcher(self.ha_client)
         
         # Camera refresh integration
-        self._camera_refresh_interval = 10  # seconds
+        self._camera_refresh_interval = 1  # seconds
         
         # Media player album art cache (entity_id -> last entity_picture URL)
         self._media_art_cache = {}
@@ -215,6 +216,11 @@ class PrismDesktopApp(QObject):
         self._ha_websocket.connected.connect(self.on_ws_connected)
         self._ha_websocket.disconnected.connect(self.on_ws_disconnected)
         self._ha_websocket.error.connect(self.on_ws_error)
+        
+        # Apply any saved webhook_id so it subscribes to push_notification_channel on connect
+        saved_webhook_id = self.config.get('mobile_app', {}).get('webhook_id', '')
+        if saved_webhook_id:
+            self._ha_websocket.set_webhook_id(saved_webhook_id)
         
         # Keep WS isolated in thread for now
         self._ws_task = asyncio.create_task(self._ha_websocket.run_reconnect_loop())
@@ -374,6 +380,8 @@ class PrismDesktopApp(QObject):
              
         if ha_changed:
             print("HA config changed, restarting connections...")
+            # Clear mobile_app registration so we re-register with the new HA instance
+            self.config.setdefault("mobile_app", {}).pop("webhook_id", None)
             self.stop_websocket()
             await self.ha_client.close()
             
@@ -616,14 +624,35 @@ class PrismDesktopApp(QObject):
                 # to avoid clearing on random sensor updates if we reuse this logic
                 self.dashboard.update_media_art(entity_id, None)
                 
-    @pyqtSlot(str, str)
-    def on_notification(self, title, message):
-        self.notification_manager.show_ha_notification(title, message)
+    @pyqtSlot(dict)
+    def on_notification(self, payload: dict):
+        self.notification_manager.show_ha_notification(payload)
     
     @pyqtSlot()
     def on_ws_connected(self):
         print("WS Connected")
         self.fetch_initial_states()
+        # Register as a Mobile App so HA exposes notify.mobile_app_prism_desktop
+        _create_task_safe(self._register_mobile_app())
+
+    async def _register_mobile_app(self):
+        ha_config = self.config.get('home_assistant', {})
+        webhook_id = await register_mobile_app(
+            ha_url=ha_config.get('url', ''),
+            ha_token=ha_config.get('token', ''),
+            config=self.config,
+            save_config_fn=self.save_config,
+        )
+        # If this was a brand-new registration, update the running WS client
+        # and reconnect so it subscribes to the push_notification_channel
+        if webhook_id and self._ha_websocket:
+            was_already_subscribed = bool(self._ha_websocket._webhook_id)
+            self._ha_websocket.set_webhook_id(webhook_id)
+            if not was_already_subscribed:
+                # Force a reconnect so the connect() flow re-runs with the webhook_id set
+                print("[MobileApp] New registration — reconnecting WS for push channel subscription")
+                self.stop_websocket()
+                self.start_websocket()
         
     @pyqtSlot()
     def on_ws_disconnected(self):

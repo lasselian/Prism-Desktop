@@ -73,7 +73,8 @@ class DashboardButtonStyleManager:
             return
         if (button._state == "on" or button._state == "open" or button._state == "locked" or 
             (button.config and button.config.get('type') == 'script') or
-            (button.config and button.config.get('type') == 'widget' and button.config.get('color'))):
+            (button.config and button.config.get('type') == 'widget' and button.config.get('color')) or
+            (button.config and button.config.get('type') == 'input_number' and button.config.get('color'))):
              # On - Use button's custom color if set, otherwise theme accent
              button_color = button.config.get('color', colors['accent'])
              
@@ -149,6 +150,10 @@ class DashboardButtonStyleManager:
                      color: {text_color};
                      font-weight: {Typography.WEIGHT_REGULAR}; 
                      font-size: {Typography.SIZE_BUTTON_ICON_SMALL};
+                }}
+                /* Input Number text readability */
+                DashboardButton[type="input_number"] QLabel#valueLabel {{
+                     color: {text_color};
                 }}
                 /* Curtain uses icon */
                 DashboardButton[type="curtain"] QLabel#valueLabel {{
