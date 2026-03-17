@@ -76,10 +76,6 @@ If you want to modify the code or run it manually:
    ```bash
    pip install -r requirements.txt
    ```
-   Or manually:
-   ```bash
-   pip install PyQt6 pystray aiohttp Pillow requests pynput winotify keyring
-   ```
 3. Run the application:
    ```bash
    python main.py
